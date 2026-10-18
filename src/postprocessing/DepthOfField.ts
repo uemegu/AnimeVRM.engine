@@ -106,8 +106,11 @@ export class DepthOfFieldPass extends Pass {
     if (params) this.params = params;
   }
 
-  /** ピントを合わせる距離（カメラの向きに沿った奥行き m）とカメラ */
-  public setFocus(camera: THREE.PerspectiveCamera, focusDistance: number): void {
+  /**
+   * ピントを合わせる距離（カメラの向きに沿った奥行き m）とカメラ。
+   * lens は焦点距離の倍率（絞りの値をそろえたまま望遠にすると、口径が広がってぼけが強くなる）
+   */
+  public setFocus(camera: THREE.PerspectiveCamera, focusDistance: number, lens = 1): void {
     const u = this.material.uniforms;
     const height = u.uResolution.value.y as number;
     const focus = Math.max(focusDistance, camera.near * 2);
@@ -116,8 +119,8 @@ export class DepthOfFieldPass extends Pass {
     u.uNearFar.value.set(camera.near, camera.far);
     u.uFocus.value = focus;
     u.uSharpRange.value = this.params.sharpRange;
-    u.uCocScale.value = (this.params.aperture / frameHeight) * height;
-    u.uMaxRadius.value = 0.5 * this.params.maxBlur * height;
+    u.uCocScale.value = ((this.params.aperture * lens) / frameHeight) * height;
+    u.uMaxRadius.value = 0.5 * this.params.maxBlur * lens * height;
   }
 
   public setSize(width: number, height: number): void {

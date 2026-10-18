@@ -44,7 +44,9 @@ stage.setCameraShot('wide', 'aoi');
 
 - `presets.timeOfDay` は時間帯ごとの光・ポストプロセスの設定、`presets.locations` は場所ごとの背景の設定です。項目は `src/schema/visual.ts` にあります。`examples/basic/day.json` が昼の設定の例です。
 - `setCast` に渡すキャラの項目（立ち位置、表情、モーション、視線、演出など）は `src/schema/stage.ts` の `StageCastMember` です。
-- カメラの構図は `setCameraShot`（`wide` / `medium` / `speaker` / `close` / `side`）で選びます。手で動かすときは `setFreeCamera(true)` にして `viewCamera` を操作します。
+- カメラの構図は `setCameraShot`（`wide` / `medium` / `speaker` / `close` / `side`）で選びます。構図を変えるとカメラはその場で切り替わり（カット）、滑らかに動かすのはタイムラインで秒数を指定したときだけです。手で動かすときは `setFreeCamera(true)` にして `viewCamera` を操作します。
+- 構図ごとにレンズが変わります。`close` は望遠（遠くから狭い画角で撮り、背景が詰まってぼける）、`wide` は広角です。倍率は場所の設定 `camera.<構図>.lens` で変えられ、1 にすると場所の画角のままになります。
+- `presets.motions` にモーションごとの `fadeIn`（前のモーションからつなぐ秒数）を書くと、驚きは鋭く、待機への戻りはゆっくりつなげます。
 
 ## 素材の置き場所
 

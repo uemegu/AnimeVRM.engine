@@ -75,6 +75,12 @@ export const CameraMove = z.union([
     duration: z.number().positive().optional(),
     /** 動きの大きさの倍率（1 で標準） */
     amount: z.number().positive().max(3).optional(),
+    /**
+     * 前のカットで同じ種類の動きをしていたら、頭からやり直さずに続ける（構図も前のカットと同じにする）。
+     * 寄りながら・引きながら、何人かが話し続けるときに、続くカットすべてに付ける（最初のカットは前に同じ動きがないので頭から始まる）。
+     * 続ける動きは、カットを進めるときに終わりを待たない
+     */
+    continue: z.boolean().optional(),
   }),
 ]);
 export type CameraMove = z.infer<typeof CameraMove>;
@@ -267,6 +273,8 @@ export interface ResolvedCameraMove {
   duration: number;
   amount: number;
   at: number;
+  /** 前のカットの同じ動きを続ける */
+  continue?: boolean;
 }
 
 /** カット内のある時刻のカメラ（キーフレームで切り替えた構図・直接指定） */

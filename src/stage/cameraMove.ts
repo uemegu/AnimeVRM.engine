@@ -29,12 +29,12 @@ function easeInOutCubic(t: number): number {
 
 /**
  * 構図のカメラ（base）にカメラの動きを重ねて camera に当てる。time はカット内の時刻（頭出ししても同じ絵になる）。
- * ドリーインは構図から離れた所から始めて構図へ着地する。ズームインは構図から画角で寄っていく
+ * ドリーインは構図から離れた所から始めて構図へ着地する。ズームインは構図から画角で、顔の画面上の位置を中心に寄っていく
  */
 export function applyCameraMove(
   camera: THREE.PerspectiveCamera,
   base: { position: THREE.Vector3; target: THREE.Vector3 },
-  /** 寄る相手の顔の位置（ズームインで寄るほど視線をここへ移し、顔が画面の外へ切れないようにする） */
+  /** 寄る相手の顔の位置（ズームインはここを中心に寄る。顔は画面上の位置のまま大きくなり、外へ切れない） */
   face: THREE.Vector3 | null,
   baseFov: number,
   move: ResolvedCameraMove,
@@ -55,7 +55,7 @@ export function applyCameraMove(
   let widen = 0;
   let narrow = 0;
   let keepSize = false;
-  let lookAtFace = 0;
+  let zoomAboutFace = false;
   switch (move.type) {
     case 'pan_left':
       yaw = -PAN_RAD * landing;
@@ -77,7 +77,7 @@ export function applyCameraMove(
       break;
     case 'zoom_in':
       narrow = ZOOM_IN_SCALE * leaving;
-      lookAtFace = eased;
+      zoomAboutFace = true;
       break;
     case 'zoom_out':
       widen = ZOOM_OUT_SCALE * leaving;
@@ -115,7 +115,8 @@ export function applyCameraMove(
 
   const position = base.position.clone();
   const target = base.target.clone();
-  if (face && lookAtFace) target.lerp(face, lookAtFace);
+  // 顔を中央へ寄せずに、顔からの視線のずれを倍率で縮める（構図の余白を保ったまま、顔を中心に拡大する）
+  if (face && zoomAboutFace) target.sub(face).divideScalar(1 + narrow).add(face);
   if (orbit) position.sub(target).applyAxisAngle(UP, orbit).add(target);
   const distance = position.distanceTo(target);
   if (back) position.addScaledVector(position.clone().sub(target).normalize(), back * distance);

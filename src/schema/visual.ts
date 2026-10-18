@@ -221,14 +221,19 @@ export interface ShotRig {
   distance: number;
   height: number;
   targetHeight: number;
+  /**
+   * レンズ（場所の画角に対する焦点距離の倍率）。被写体の大きさは distance で決めたまま、カメラを離して画角を狭める。
+   * 1 より大きいと望遠（顔のパースがゆがまず、背景が詰まってぼける）、小さいと広角（空間が広く見える）
+   */
+  lens?: number;
 }
 
 /** 構図の既定値（場所で指定がなければこれを使う） */
 export const DEFAULT_SHOT_RIGS: Record<'wide' | 'medium' | 'speaker' | 'close' | 'side', ShotRig> = {
-  wide: { distance: 2.3, height: -0.22, targetHeight: -0.37 },
+  wide: { distance: 2.3, height: -0.22, targetHeight: -0.37, lens: 0.8 },
   medium: { distance: 2.2, height: -0.2, targetHeight: -0.3 },
-  speaker: { distance: 1.6, height: -0.17, targetHeight: -0.27 },
-  close: { distance: 1.2, height: -0.09, targetHeight: -0.14 },
+  speaker: { distance: 1.6, height: -0.17, targetHeight: -0.27, lens: 1.25 },
+  close: { distance: 1.2, height: -0.09, targetHeight: -0.14, lens: 1.8 },
   // 歩きながらの会話（カメラを話者の左横・少し手前に置き、話者が画面の左から3割ほどに横向きで映る）
   side: { distance: 1.3, height: -0.17, targetHeight: -0.12 },
 };
@@ -247,6 +252,7 @@ const shotRig = (ja: string, en: string, def: ShotRig) =>
     distance: num('距離', 'Distance', 0.6, 6, 0.05, def.distance),
     height: num('カメラの高さ（頭から）', 'Height (from head)', -1.2, 1, 0.01, def.height),
     targetHeight: num('注視点の高さ（頭から）', 'Look-at height (from head)', -1.2, 1, 0.01, def.targetHeight),
+    lens: num('レンズ（焦点距離の倍率。1 で場所の画角のまま）', 'Lens (focal length ×, 1 keeps the location FOV)', 0.5, 3, 0.05, def.lens ?? 1).optional(),
   });
 
 const slot = (ja: string, en: string, def: [number, number, number]) =>

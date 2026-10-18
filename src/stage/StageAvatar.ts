@@ -192,6 +192,11 @@ export async function loadMixamoAnimation(url: string, vrm: VRM): Promise<THREE.
  * そのまま移すとアニメ体型ではなで肩に見える
  */
 const SHOULDER_ROTATION_SCALE = 0.5;
+/** 首・頭が視線の先へ追う速さ（1/秒）と、胸が頭の向きを追う速さ（遅いほど遅れる） */
+const HEAD_FOLLOW_RATE = 6;
+const CHEST_FOLLOW_RATE = 2.5;
+/** 視線の先がこれ以上移ったら、振り向きに合わせてまばたきする */
+const GAZE_BLINK_RAD = THREE.MathUtils.degToRad(20);
 
 /**
  * 鎖骨の回転を弱め、そのぶんを上腕で打ち消す（肩の高さだけ変わり、腕の向きは元のモーションのまま）。
@@ -312,6 +317,10 @@ export class StageAvatar {
   private opacity = 1;
   private headYaw = 0;
   private headPitch = 0;
+  /** 胸の向き（頭より遅れて追う） */
+  private chestYaw = 0;
+  /** 前に見ていた向き（頭からの単位ベクトル。大きく変わったらまばたきする） */
+  private gazeDirection: THREE.Vector3 | null = null;
   /** 前のフレームで首・頭に足した回転（モーションが上書きしないボーンでも積み重ならないよう、次のフレームで戻す） */
   private appliedTurn: Array<{ bone: THREE.Object3D; rotation: THREE.Quaternion }> = [];
 
@@ -563,6 +572,8 @@ export class StageAvatar {
       expressionName = 'neutral';
     }
 
+    // 感情が切り替わる瞬間にまばたきを挟む（アニメの「目パチで芝居を切る」）
+    if (expressionName !== this.currentExpression) this.blinkNow();
     this.currentExpression = expressionName;
     this.expressionTransitionDuration = Math.max(0, duration);
 
@@ -798,6 +809,7 @@ export class StageAvatar {
    */
   public setGaze(target: THREE.Vector3 | null, headTurn = 0): void {
     this.headTurn = target ? THREE.MathUtils.clamp(headTurn, 0, 1) : 0;
+    this.blinkOnLargeGazeShift(target);
     const lookAt = this.vrm?.lookAt;
     if (target) {
       this.gazeTarget = (this.gazeTarget ?? new THREE.Vector3()).copy(target);
@@ -814,7 +826,27 @@ export class StageAvatar {
     }
   }
 
-  /** 首と頭を少しずつ注視点へ回す（左右 35°・上下 15° まで × headTurn） */
+  /** 次のフレームでまばたきを始める（まばたきの途中なら何もしない） */
+  private blinkNow(): void {
+    if (this.blinkState === 'open') this.blinkTimer = 0;
+  }
+
+  /** 視線の先が大きく（20°以上）移ったら、振り向きに合わせてまばたきする */
+  private blinkOnLargeGazeShift(target: THREE.Vector3 | null): void {
+    const head = this.vrm?.humanoid?.getNormalizedBoneNode('head');
+    if (!this.vrm || !head) return;
+    const from = head.getWorldPosition(new THREE.Vector3());
+    const direction = target
+      ? target.clone().sub(from).normalize()
+      : new THREE.Vector3(0, 0, 1).applyQuaternion(this.vrm.scene.getWorldQuaternion(new THREE.Quaternion()));
+    if (this.gazeDirection && this.gazeDirection.angleTo(direction) > GAZE_BLINK_RAD) this.blinkNow();
+    this.gazeDirection = direction;
+  }
+
+  /**
+   * 首と頭を少しずつ注視点へ回す（左右 35°・上下 15° まで × headTurn）。
+   * 目（VRM の視線）が先に向き、首・頭が遅れて、胸がさらに遅れて少しだけ追う
+   */
   private updateHeadTurn(delta: number): void {
     const humanoid = this.vrm?.humanoid;
     const head = humanoid?.getNormalizedBoneNode('head');
@@ -831,18 +863,22 @@ export class StageAvatar {
       yaw = THREE.MathUtils.clamp(Math.atan2(dir.x, dir.z), -0.61, 0.61) * this.headTurn;
       pitch = THREE.MathUtils.clamp(Math.atan2(dir.y, Math.hypot(dir.x, dir.z)), -0.26, 0.26) * this.headTurn;
     }
-    const k = 1 - Math.exp(-delta * 6);
+    const k = 1 - Math.exp(-delta * HEAD_FOLLOW_RATE);
     this.headYaw += (yaw - this.headYaw) * k;
     this.headPitch += (pitch - this.headPitch) * k;
-    if (Math.abs(this.headYaw) < 1e-4 && Math.abs(this.headPitch) < 1e-4) return;
-    // 首に4割、頭に6割（上を向くのは X 軸まわりの負の回転）
-    const turn = (bone: THREE.Object3D, share: number) => {
-      const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-this.headPitch * share, this.headYaw * share, 0, 'YXZ'));
+    this.chestYaw += (this.headYaw - this.chestYaw) * (1 - Math.exp(-delta * CHEST_FOLLOW_RATE));
+    if (Math.abs(this.headYaw) < 1e-4 && Math.abs(this.headPitch) < 1e-4 && Math.abs(this.chestYaw) < 1e-4) return;
+    // 胸に1.5割（左右だけ）、首に3.5割、頭に5割（上を向くのは X 軸まわりの負の回転）
+    const turn = (bone: THREE.Object3D, pitchShare: number, yawShare: number, yawSource = this.headYaw) => {
+      const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-this.headPitch * pitchShare, yawSource * yawShare, 0, 'YXZ'));
       bone.quaternion.multiply(rotation);
       this.appliedTurn.push({ bone, rotation });
     };
-    if (neck) turn(neck, 0.4);
-    turn(head, neck ? 0.6 : 1);
+    const chest = humanoid?.getNormalizedBoneNode('upperChest') ?? humanoid?.getNormalizedBoneNode('chest');
+    const chestShare = chest ? 0.15 : 0;
+    if (chest) turn(chest, 0, chestShare, this.chestYaw);
+    if (neck) turn(neck, 0.4, 0.35);
+    turn(head, neck ? 0.6 : 1, (neck ? 0.5 : 0.85) + (chest ? 0 : chestShare));
   }
 
   public dispose(): void {

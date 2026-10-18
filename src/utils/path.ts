@@ -26,6 +26,11 @@ export function motionUrl(motion: string): string {
   return /^(blob:|data:|https?:|\/)/.test(motion) ? motion : assetConfig.motionUrl(motion);
 }
 
+/** 待機モーションの名前（null は待機モーションなし） */
+export function idleMotion(): string | null {
+  return assetConfig.idleMotion;
+}
+
 /** 待機モーションの URL（null は待機モーションなし） */
 export function idleMotionUrl(): string | null {
   return assetConfig.idleMotion === null ? null : motionUrl(assetConfig.idleMotion);

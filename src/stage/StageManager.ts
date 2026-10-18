@@ -22,7 +22,7 @@ import { applyCelShading, setCelLight } from '../scene/celShading';
 import { ScrollingBackground, type ScrollingBackgroundSettings } from './ScrollingBackground';
 import { StageAvatar, loadMixamoAnimation } from './StageAvatar';
 import { Crowd } from './Crowd';
-import { idleMotionUrl, motionUrl, preloadAssets, resolveAssetUrl } from '../utils/path';
+import { idleMotion as assetIdleMotion, idleMotionUrl, motionUrl, preloadAssets, resolveAssetUrl } from '../utils/path';
 import { preloadVoiceAnalyser } from '../audio/VoiceAnalyser';
 import { ScreenEffects } from './ScreenEffects';
 import { RainGround } from './RainGround';
@@ -44,7 +44,14 @@ import { FrameRateCheck, resolveStageQuality, stageQualityOf, type StageQuality,
 // 3D背景の動かない小物の影を描くときだけ使うレイヤー（staticShadowCamera が見る）
 const STATIC_SHADOW_LAYER = 8;
 const POSE_CLIP_MAX_SEC = 0.2;
+/** カットの途中で立ち位置が変わったときに、カメラが追いかける秒数（構図を変えたときは秒数の指定がなければ切り替える） */
 const CAMERA_TRANSITION_SEC = 0.6;
+/** カットの頭からこの秒数までは、キャラの読み込みで立ち位置が決まっても追いかけずに合わせる */
+const CUT_SETTLE_SEC = 0.3;
+/** 1つの構図の中でピントを別の顔へ送る秒数 */
+const FOCUS_PULL_SEC = 0.4;
+/** 話者の視線の先に空ける余白（画面の幅に対する割合。話者を中央からこれだけ反対側へ寄せる） */
+const LOOK_ROOM_RATIO = 0.1;
 /** 横からの構図：カメラと注視点を話者より少し手前に、注視点を話者の少し前（左）に置く */
 const SIDE_SHOT_FORWARD = 0.25;
 const SIDE_SHOT_LEAD = 0.12;
@@ -75,6 +82,8 @@ export interface StagePresets {
   timeOfDay: Record<string, TimeOfDayPreset>;
   /** 場所ごとの背景（キー: 場所の ID） */
   locations: Record<string, LocationVisualPreset>;
+  /** モーションごとの再生の仕方（キー: モーション名）。fadeIn は前のモーションからつなぐ秒数（省略時 0.5） */
+  motions?: Record<string, { fadeIn?: number }>;
 }
 
 export interface StageOptions {
@@ -224,8 +233,24 @@ export class StageManager {
   private timelineShift: CameraShift | null = null;
   private timelinePose: { pose: CameraPoseSetting; duration?: number } | null = null;
   private cameraTransitionSec = CAMERA_TRANSITION_SEC;
+  /** キーで構図を切り替えたときの、動かす秒数の指定 */
+  private timelineShotDuration: number | undefined;
+  /** 今の構図（構図・寄る相手・ずらし・直接指定・場所）。変わったらカメラを切り替える */
+  private cameraFraming = '';
+  /** ピントを合わせている顔（キャラ ID、顔が映っていなければ空）と、そこへ送り始めた時刻・送る前の顔 */
+  private focusSubject: string | null = null;
+  private focusPull: { from: string; at: number } | null = null;
+  /** 最後にカメラを切り替えた時刻（その直後に合わせる顔が変わっても、ピントは送らずに合わせる） */
+  private cameraCutAt = -Infinity;
+  /** 今の構図のレンズ（場所の画角に対する焦点距離の倍率。背景ぼかしの強さに掛ける） */
+  private cameraLens = 1;
   /** カットのカメラの動き（パン・ドリーなど。構図に重ねる） */
   private cameraMove: ResolvedCameraMove | null = null;
+  /** カメラの動きの、前のカットまでに進んだ秒数（続ける動きのとき）と、直前のフレームでの動きの時刻 */
+  private cameraMoveOffset = 0;
+  private cameraMoveTime = 0;
+  /** 前のカットの終わりの動き（次のカットが continue なら引き継ぐ） */
+  private carriedMove: { move: ResolvedCameraMove; time: number } | null = null;
   /** previewCameraMove で試すカメラの動き（at は clock の時刻。カットの動きがあればそちらが優先） */
   private previewMove: ResolvedCameraMove | null = null;
   /** 構図の画角（ズームなどの動きはこれを基準に変える） */
@@ -1332,9 +1357,12 @@ export class StageManager {
     if (pending !== undefined) window.clearTimeout(pending);
     this.motionReturnTimers.delete(id);
 
-    avatar.playAnimation(url, loop).then((action) => {
+    // 同じループを再生している人がいたら、その人数に応じて再生位置をずらす（並んだキャラが同じ周期で揺れないように）
+    const phase = loop && url ? this.motionPhase(id, url) : 0;
+    avatar.playAnimation(url, loop, this.motionFadeIn(motion)).then((action) => {
       // 頭出しでは途中から再生する
-      if (action && offsetSec > 0) action.time = loop ? offsetSec % action.getClip().duration : Math.min(offsetSec, action.getClip().duration);
+      const duration = action?.getClip().duration ?? 0;
+      if (action && (offsetSec > 0 || phase > 0)) action.time = loop ? (offsetSec + phase * duration) % duration : Math.min(offsetSec, duration);
       if (loop || !action || this.isDisposed) return;
       // 1枚の絵から作った止め絵のポーズ（ほぼ長さのないモーション）は、待機に戻さずそのまま保つ
       if (action.getClip().duration <= POSE_CLIP_MAX_SEC) return;
@@ -1342,10 +1370,22 @@ export class StageManager {
       const timer = window.setTimeout(() => {
         this.motionReturnTimers.delete(id);
         if (this.avatarMotionUrls.get(id) !== key) return;
-        avatar.playAnimation(idleMotionUrl(), true);
+        avatar.playAnimation(idleMotionUrl(), true, this.motionFadeIn(undefined));
       }, durationMs);
       this.motionReturnTimers.set(id, timer);
     });
+  }
+
+  /** 前のモーションからつなぐ秒数（モーションの設定。省略は 0.5 秒。motion がなければ待機モーション） */
+  private motionFadeIn(motion: string | undefined): number {
+    return this.presets.motions?.[motion || assetIdleMotion() || '']?.fadeIn ?? 0.5;
+  }
+
+  /** ループの再生位置のずらし（周期に対する割合）。同じモーションを先に再生している人が何人いるかで決める */
+  private motionPhase(id: string, url: string): number {
+    const others = this.castIds.filter((other) => other !== id && this.avatarMotionUrls.get(other)?.startsWith(`${url}|`)).length;
+    // 黄金比で割ると、何人並んでも位相が重ならない
+    return (others * 0.618) % 1;
   }
 
   /** 歩きながらの会話などで背景を横に流す（null で止めて場所の遠景に戻す） */
@@ -1439,14 +1479,15 @@ export class StageManager {
    * 背景ぼかしのピントの距離（カメラの向きに沿った奥行き m）。
    * 画面に映っているキャラの顔に合わせる（話者を優先し、いなければ一番手前の顔）。
    * 注視点で測ると、注視点を奥にしたまま顔に寄ったときに顔がぼけて背景にピントが合う。
-   * 顔が映っていなければ注視点で測る
+   * 顔が映っていなければ注視点で測る。
+   * 構図を変えずに合わせる顔が変わったら（話者が替わったなど）、FOCUS_PULL_SEC かけて前の顔から送る
    */
-  private focusDistance(): number {
+  private focusDistance(now: number): number {
     const forward = this.camera.getWorldDirection(new THREE.Vector3());
     const depthOf = (point: THREE.Vector3) => point.clone().sub(this.camera.position).dot(forward);
     this.camera.updateMatrixWorld();
-    let speaker: number | null = null;
-    let nearest: number | null = null;
+    const faces = new Map<string, number>();
+    let nearest: string | null = null;
     for (const id of this.castIds) {
       const head = this.loadedAvatars.get(id)?.vrm?.humanoid?.getNormalizedBoneNode('head');
       if (!head) continue;
@@ -1455,10 +1496,26 @@ export class StageManager {
       if (depth <= this.camera.near) continue;
       const ndc = point.clone().project(this.camera);
       if (Math.abs(ndc.x) > 1.1 || Math.abs(ndc.y) > 1.1) continue;
-      if (id === this.speakerId) speaker = depth;
-      if (nearest === null || depth < nearest) nearest = depth;
+      faces.set(id, depth);
+      if (nearest === null || depth < faces.get(nearest)!) nearest = id;
     }
-    return speaker ?? nearest ?? depthOf(this.cameraCurrentTarget);
+    const subject = this.speakerId && faces.has(this.speakerId) ? this.speakerId : nearest;
+    const depthOfSubject = (id: string | null) => (id !== null ? faces.get(id) : undefined) ?? depthOf(this.cameraCurrentTarget);
+    if (subject !== this.focusSubject) {
+      // カメラを切り替えた直後（focusPull を消してある）や、最初の顔は送らずに合わせる
+      const switched = now - this.cameraCutAt < 0.1;
+      this.focusPull = this.focusSubject !== null && !switched ? { from: this.focusSubject, at: now } : null;
+      this.focusSubject = subject;
+    }
+    const depth = depthOfSubject(subject);
+    if (!this.focusPull) return depth;
+    const t = (now - this.focusPull.at) / FOCUS_PULL_SEC;
+    if (t >= 1) {
+      this.focusPull = null;
+      return depth;
+    }
+    const from = depthOfSubject(faces.has(this.focusPull.from) ? this.focusPull.from : subject);
+    return THREE.MathUtils.lerp(from, depth, easeInOutCubic(Math.max(0, t)));
   }
 
   /** 今の注視点（カメラを手で動かすときの初期値） */
@@ -1485,6 +1542,7 @@ export class StageManager {
     this.cutStartedAt = this.clock.elapsedTime;
     this.appliedCut.clear();
     this.appliedCutCamera = '';
+    this.carriedMove = this.cameraMove ? { move: this.cameraMove, time: this.cameraMoveTime } : null;
     // 前のカットの文字演出・汗は消す
     this.firedOneShots.clear();
     this.loadedAvatars.forEach((avatar) => avatar.effects?.clearOneShots());
@@ -1589,7 +1647,11 @@ export class StageManager {
       this.timelineShot = camera.pose ? null : (camera.shot ?? null);
       this.timelineShift = camera.shift ?? null;
       this.timelinePose = camera.pose ? { pose: camera.pose, duration: seek ? 0 : camera.duration } : null;
-      this.cameraMove = camera.move ?? null;
+      this.timelineShotDuration = seek ? undefined : camera.duration;
+      // 続ける動きは、前のカットの動きと進んだ秒数を引き継ぐ
+      const carried = camera.move?.continue && this.carriedMove?.move.type === camera.move.type ? this.carriedMove : null;
+      this.cameraMove = carried?.move ?? camera.move ?? null;
+      this.cameraMoveOffset = carried?.time ?? 0;
       this.updateCameraTarget();
     }
   }
@@ -1724,8 +1786,54 @@ export class StageManager {
     }
   }
 
-  /** 構図の値からカメラの位置と注視点を決める */
+  /** 構図の値からカメラの位置と注視点を決め、構図のレンズと視線の先の余白を当てる */
   private shotPose(frame: ReturnType<StageManager['shotFrame']>): CameraPose {
+    const pose = this.rigPose(frame);
+    const lens = this.shotLens(frame);
+    // 被写体の大きさを保ったまま、望遠ほどカメラを離す（画角は shotFov で狭める）
+    if (lens !== 1) pose.position.sub(pose.target).multiplyScalar(lens).add(pose.target);
+    const side = frame.shot === 'speaker' || frame.shot === 'close' ? this.lookSide() : 0;
+    if (side !== 0) {
+      const forward = new THREE.Vector3().subVectors(pose.target, pose.position);
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+      const width = 2 * forward.length() * Math.tan(THREE.MathUtils.degToRad(this.shotFov(frame)) / 2) * this.camera.aspect;
+      // 見ている側へカメラごと寄せると、話者は反対側に寄り、視線の先が空く
+      const offset = right.multiplyScalar(side * width * LOOK_ROOM_RATIO);
+      pose.position.add(offset);
+      pose.target.add(offset);
+    }
+    return pose;
+  }
+
+  /** 構図のレンズ（場所の画角に対する焦点距離の倍率） */
+  private shotLens(frame: ReturnType<StageManager['shotFrame']>): number {
+    return frame.rig.lens ?? 1;
+  }
+
+  /** 構図の画角。場所の画角を、レンズの倍率だけ狭める（広げる） */
+  private shotFov(frame: ReturnType<StageManager['shotFrame']>): number {
+    const base = this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
+    const lens = this.shotLens(frame);
+    return lens === 1 ? base : THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(base) / 2) / lens));
+  }
+
+  /** 寄っている相手が画面のどちら側（右 1・左 -1）を見ているか。カメラや正面を見ているなら 0 */
+  private lookSide(): number {
+    const id = this.cameraFocusId;
+    if (!id) return 0;
+    const target = this.gaze.get(id)?.target;
+    const other =
+      target === 'speaker' ? this.speakerId
+      : target === 'partner' ? (this.speakerId && this.speakerId !== id ? this.speakerId : this.castIds.find((o) => o !== id))
+      : target && this.castIds.includes(target) ? target
+      : null;
+    if (!other || other === id) return 0;
+    const dx = (this.castPositions.get(other) ?? 0) - (this.castPositions.get(id) ?? 0);
+    return Math.abs(dx) < 0.05 ? 0 : Math.sign(dx);
+  }
+
+  /** 構図の値（距離・高さ）そのままのカメラの位置と注視点 */
+  private rigPose(frame: ReturnType<StageManager['shotFrame']>): CameraPose {
     const { rig, x, z, head } = frame;
     const distance = rig.distance + frame.extraDistance;
     return frame.shot === 'side'
@@ -1753,10 +1861,13 @@ export class StageManager {
   /** カメラの位置と注視点から、今の構図の値（距離・カメラの高さ・注視点の高さ）を逆算する */
   public shotRigFromPose(position: THREE.Vector3, target: THREE.Vector3): { shot: CameraShot; rig: ShotRig } {
     const frame = this.shotFrame();
+    // レンズで離した分を戻して、構図の値の位置にする
+    const lens = this.shotLens(frame);
+    if (lens !== 1) position = position.clone().sub(target).divideScalar(lens).add(target);
     const distance = frame.shot === 'side' ? frame.x - position.x : position.z - frame.z;
     return {
       shot: frame.shot,
-      rig: { distance: distance - frame.extraDistance, height: position.y - frame.head, targetHeight: target.y - frame.head },
+      rig: { ...frame.rig, distance: distance - frame.extraDistance, height: position.y - frame.head, targetHeight: target.y - frame.head },
     };
   }
 
@@ -1768,13 +1879,24 @@ export class StageManager {
     const pose: CameraPose = direct
       ? { position: new THREE.Vector3(...direct.position), target: new THREE.Vector3(...direct.target) }
       : this.shiftPose(this.shotPose(frame), this.currentShift());
-    const fov = direct?.fov ?? this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
+    const fov = direct ? (direct.fov ?? this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV) : this.shotFov(frame);
+    // 直接指定の画角も、場所の画角より狭ければ望遠としてぼかしを強める
+    const locationFov = this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
+    const halfTan = (deg: number) => Math.tan(THREE.MathUtils.degToRad(deg) / 2);
+    this.cameraLens = direct ? halfTan(locationFov) / halfTan(fov) : this.shotLens(frame);
     this.baseFov = fov;
     if (this.camera.fov !== fov) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
     }
-    this.cameraTransitionSec = this.timelinePose?.duration ?? CAMERA_TRANSITION_SEC;
+    // 構図が変わったらカメラを切り替える（アニメのカット割り）。秒数の指定があるときだけ動かす。
+    // 同じ構図のまま立ち位置が変わったときは追いかける（カットの頭は読み込みで位置が決まるだけなので合わせる）
+    const framing = JSON.stringify([frame.shot, this.cameraFocusId, this.currentShift(), direct, this.currentLocationId]);
+    const reframed = framing !== this.cameraFraming;
+    this.cameraFraming = framing;
+    const settling = this.clock.elapsedTime - this.cutStartedAt < CUT_SETTLE_SEC;
+    const requested = this.timelinePose ? this.timelinePose.duration : this.timelineShot ? this.timelineShotDuration : undefined;
+    this.cameraTransitionSec = reframed || settling ? (requested ?? 0) : CAMERA_TRANSITION_SEC;
 
     if (
       this.hasCameraPose &&
@@ -1789,17 +1911,23 @@ export class StageManager {
     // 最初の構図は補間せずに合わせる
     this.cameraElapsed = this.hasCameraPose ? 0 : this.cameraTransitionSec;
     this.hasCameraPose = true;
+    // 切り替えたらピントも送らずに合わせる
+    if (this.cameraTransitionSec === 0) {
+      this.focusPull = null;
+      this.cameraCutAt = this.clock.elapsedTime;
+    }
   }
 
   private updateCamera(delta: number): void {
-    const duration = Math.max(1e-3, this.cameraTransitionSec);
+    const duration = this.cameraTransitionSec;
     this.cameraElapsed = Math.min(duration, this.cameraElapsed + delta);
-    const t = easeInOutCubic(this.cameraElapsed / duration);
+    const t = duration > 0 ? easeInOutCubic(this.cameraElapsed / duration) : 1;
     this.cameraBasePosition.lerpVectors(this.cameraFrom.position, this.cameraTo.position, t);
     this.cameraCurrentTarget.lerpVectors(this.cameraFrom.target, this.cameraTo.target, t);
     const move = this.cameraMove ?? this.previewMove;
     if (move) {
-      const time = this.cameraMove ? this.cutTime : this.clock.elapsedTime;
+      const time = this.cameraMove ? this.cameraMoveOffset + this.cutTime : this.clock.elapsedTime;
+      if (this.cameraMove) this.cameraMoveTime = time;
       const frame = this.shotFrame();
       const face = this.castIds.length > 0 ? new THREE.Vector3(frame.x, frame.head, frame.z) : null;
       applyCameraMove(this.camera, { position: this.cameraBasePosition, target: this.cameraCurrentTarget }, face, this.baseFov, move, time);
@@ -1915,7 +2043,7 @@ export class StageManager {
       if (!this.freeCamera) this.updateCamera(delta);
       this.updateLayerPlacement();
       if (this.depthOfFieldPass.enabled) {
-        this.depthOfFieldPass.setFocus(this.camera, this.focusDistance());
+        this.depthOfFieldPass.setFocus(this.camera, this.focusDistance(elapsed), this.cameraLens);
       }
       this.scrollingBackground.update(delta);
 
