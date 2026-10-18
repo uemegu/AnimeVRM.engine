@@ -44,8 +44,8 @@ stage.setCameraShot('wide', 'aoi');
 
 - `presets.timeOfDay` は時間帯ごとの光・ポストプロセスの設定、`presets.locations` は場所ごとの背景の設定です。項目は `src/schema/visual.ts` にあります。`examples/basic/day.json` が昼の設定の例です。
 - `setCast` に渡すキャラの項目（立ち位置、表情、モーション、視線、演出など）は `src/schema/stage.ts` の `StageCastMember` です。
-- カメラの構図は `setCameraShot`（`wide` / `medium` / `speaker` / `close` / `side`）で選びます。構図を変えるとカメラはその場で切り替わり（カット）、滑らかに動かすのはタイムラインで秒数を指定したときだけです。手で動かすときは `setFreeCamera(true)` にして `viewCamera` を操作します。
-- 構図ごとにレンズが変わります。`close` は望遠（遠くから狭い画角で撮り、背景が詰まってぼける）、`wide` は広角です。倍率は場所の設定 `camera.<構図>.lens` で変えられ、1 にすると場所の画角のままになります。
+- カメラの構図は `setCameraShot(構図, 寄る相手, 肩越しの手前の人)`（`wide` / `medium` / `speaker` / `close` / `side` / `ots`）で選びます。`ots` は肩越しで、手前の人を省くと、寄る相手が見ている人（いなければ話者、それもいなければ一番近い人）になります。`close` は寄る相手が誰かを見ていれば、顔を斜め前から撮ります（回り込む割合は場所の設定 `camera.close.orbit`）。構図を変えるとカメラはその場で切り替わり（カット）、滑らかに動かすのはタイムラインで秒数を指定したときだけです。手で動かすときは `setFreeCamera(true)` にして `viewCamera` を操作します。
+- 構図ごとにレンズが変わります。`close` は望遠（遠くから狭い画角で撮り、背景が詰まってぼける）、`wide` は広角です。倍率は場所の設定 `camera.<構図>.lens` で変えられます。基準の画角は、場所を見せる構図（`wide` / `medium` / `side`）では場所の画角、顔を撮る構図（`speaker` / `close` / `ots`）では標準の画角（32°）なので、画角の広い場所でも顔の寄り具合は変わりません。
 - `presets.motions` にモーションごとの `fadeIn`（前のモーションからつなぐ秒数）を書くと、驚きは鋭く、待機への戻りはゆっくりつなげます。
 
 ## 素材の置き場所

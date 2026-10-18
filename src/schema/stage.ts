@@ -23,8 +23,12 @@ export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
  * - speaker: 話者のウェストアップ（1人の場面の既定）
  * - close: 話者のバストアップ（感情の強調）
  * - side: 話者を横から（並んで歩きながらの会話。話者は画面の左寄りに横向きで映る）
+ * - ots: 肩越し。手前の人の肩の後ろから、向かいの話者を撮る（向き合って話す・問い詰める）
+ *
+ * 寄る相手は話者が既定で、ほかの人にもできる（StageManager.setCameraShot の focusId）。
+ * close は寄る相手が誰かを見ていれば、顔を斜め前から撮る
  */
-export const CameraShot = z.enum(['wide', 'medium', 'speaker', 'close', 'side']);
+export const CameraShot = z.enum(['wide', 'medium', 'speaker', 'close', 'side', 'ots']);
 export type CameraShot = z.infer<typeof CameraShot>;
 
 /**
@@ -280,6 +284,9 @@ export interface ResolvedCameraMove {
 /** カット内のある時刻のカメラ（キーフレームで切り替えた構図・直接指定） */
 export interface CutCameraState {
   shot?: CameraShot;
+  /** キーで替えた寄る相手（キャラ ID）と、肩越し（ots）の手前の人 */
+  focus?: string;
+  over?: string;
   /** 構図を切り替えたキーのずらし（省略で真ん中） */
   shift?: CameraShift;
   pose?: CameraPose;

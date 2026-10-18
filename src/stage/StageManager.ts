@@ -224,6 +224,8 @@ export class StageManager {
   // カメラ構図の補間
   private cameraShot: CameraShot = 'speaker';
   private cameraFocusId: string | null = null;
+  /** 肩越し（ots）の手前の人（null なら寄る相手が見ている人・話者・一番近い人） */
+  private cameraOverId: string | null = null;
   /** カットで直接指定したカメラ（構図の自動決定より優先） */
   private basePose: CameraPoseSetting | null = null;
   /** タイムラインで切り替えた構図・カメラ（カットの指定より優先） */
@@ -232,6 +234,9 @@ export class StageManager {
   private cameraShift: CameraShift | null = null;
   private timelineShift: CameraShift | null = null;
   private timelinePose: { pose: CameraPoseSetting; duration?: number } | null = null;
+  /** キーで替えた寄る相手と、肩越しの手前の人（カットの指定より優先） */
+  private timelineFocus: string | null = null;
+  private timelineOver: string | null = null;
   private cameraTransitionSec = CAMERA_TRANSITION_SEC;
   /** キーで構図を切り替えたときの、動かす秒数の指定 */
   private timelineShotDuration: number | undefined;
@@ -1576,6 +1581,7 @@ export class StageManager {
   /** カットの指定にタイムラインを重ねた状態を、変わったところだけ当てる */
   private applyCutState(seek: boolean): void {
     const state: CutState = this.cut ? this.cut.stateAt(this.cutTime) : { avatars: {}, camera: {}, focusLines: false, oneShots: [] };
+    let gazeArrived = false;
     for (const member of this.castMembers) {
       const avatar = this.loadedAvatars.get(member.id);
       if (!avatar?.vrm || !this.castIds.includes(member.id)) continue;
@@ -1621,6 +1627,8 @@ export class StageManager {
         this.playMotion(member.id, avatar, effective.motion, effective.motionLoop, effective.motionCue, offset);
       }
       avatar.vrm.scene.visible = effective.visible;
+      // 視線の先で構図が変わる（アップの回り込み・肩越しの手前の人）。カットで初めて当てたとき（読み込みが遅れたときなど）は決め直す
+      if (!before && this.gaze.get(member.id)?.target !== effective.lookAtTarget) gazeArrived = true;
       this.gaze.set(member.id, { target: effective.lookAtTarget, headTurn: effective.headTurn });
       if (!before || before.motionSpeed !== effective.motionSpeed) avatar.setMotionSpeed(effective.motionSpeed);
       const effects = avatar.effects;
@@ -1646,12 +1654,16 @@ export class StageManager {
       this.appliedCutCamera = cameraJson;
       this.timelineShot = camera.pose ? null : (camera.shot ?? null);
       this.timelineShift = camera.shift ?? null;
+      this.timelineFocus = camera.focus ?? null;
+      this.timelineOver = camera.over ?? null;
       this.timelinePose = camera.pose ? { pose: camera.pose, duration: seek ? 0 : camera.duration } : null;
       this.timelineShotDuration = seek ? undefined : camera.duration;
       // 続ける動きは、前のカットの動きと進んだ秒数を引き継ぐ
       const carried = camera.move?.continue && this.carriedMove?.move.type === camera.move.type ? this.carriedMove : null;
       this.cameraMove = carried?.move ?? camera.move ?? null;
       this.cameraMoveOffset = carried?.time ?? 0;
+      this.updateCameraTarget();
+    } else if (gazeArrived) {
       this.updateCameraTarget();
     }
   }
@@ -1716,10 +1728,57 @@ export class StageManager {
     return headOf(target);
   }
 
-  public setCameraShot(shot: CameraShot, focusId: string | null): void {
+  /**
+   * 構図と寄る相手（話者など）。overId は肩越し（ots）の手前の人で、
+   * null なら寄る相手が見ている人、いなければ話者、それもいなければ一番近い人
+   */
+  public setCameraShot(shot: CameraShot, focusId: string | null, overId: string | null = null): void {
     this.cameraShot = shot;
     this.cameraFocusId = focusId;
+    this.cameraOverId = overId;
     this.updateCameraTarget();
+  }
+
+  /** 今の寄る相手（キーの指定 → カットの指定） */
+  private focusId(): string | null {
+    return this.timelineFocus ?? this.cameraFocusId;
+  }
+
+  /** 肩越しの手前の人。指定 → 寄る相手が見ている人 → 話者 → 一番近い人 */
+  private overId(focusId: string | null): string | null {
+    const inCast = (id: string | null | undefined): id is string => !!id && id !== focusId && this.castIds.includes(id);
+    const explicit = this.timelineOver ?? this.cameraOverId;
+    if (inCast(explicit)) return explicit;
+    if (focusId) {
+      const looking = this.lookedAtId(focusId);
+      if (inCast(looking)) return looking;
+    }
+    if (inCast(this.speakerId)) return this.speakerId;
+    if (!focusId) return null;
+    const fx = this.castPositions.get(focusId) ?? 0;
+    const fz = this.castDepths.get(focusId) ?? 0;
+    let nearest: string | null = null;
+    let best = Infinity;
+    for (const id of this.castIds) {
+      if (!inCast(id)) continue;
+      const d = Math.hypot((this.castPositions.get(id) ?? 0) - fx, (this.castDepths.get(id) ?? 0) - fz);
+      if (d < best) {
+        best = d;
+        nearest = id;
+      }
+    }
+    return nearest;
+  }
+
+  /** id の人が見ている登場キャラ（カメラ・正面を見ているなら null） */
+  private lookedAtId(id: string): string | null {
+    const target = this.gaze.get(id)?.target;
+    const other =
+      target === 'speaker' ? this.speakerId
+      : target === 'partner' ? (this.speakerId && this.speakerId !== id ? this.speakerId : this.castIds.find((o) => o !== id))
+      : target && this.castIds.includes(target) ? target
+      : null;
+    return other && other !== id ? other : null;
   }
 
   /** 構図からカメラを上下左右へずらす（null で真ん中。カットに指定があればそちらが優先） */
@@ -1755,9 +1814,10 @@ export class StageManager {
    * extraDistance は横に広がった分だけ足す距離
    */
   private shotFrame(): { shot: CameraShot; rig: ShotRig; x: number; z: number; head: number; extraDistance: number } {
+    const focusId = this.focusId();
     const xs = this.castIds.map((id) => this.castPositions.get(id) ?? 0);
     const focusX =
-      (this.cameraFocusId !== null ? this.castPositions.get(this.cameraFocusId) : undefined) ??
+      (focusId !== null ? this.castPositions.get(focusId) : undefined) ??
       (xs.length === 1 ? xs[0] : 0);
     const centerX = xs.length > 0 ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
     const spread = xs.length > 1 ? Math.max(...xs) - Math.min(...xs) : 0;
@@ -1765,13 +1825,13 @@ export class StageManager {
     const heads = this.castIds.map((id) => this.castHeadHeights.get(id) ?? 1.42);
     const tallest = heads.length > 0 ? Math.max(...heads) : 1.42;
     const focusHead =
-      (this.cameraFocusId !== null ? this.castHeadHeights.get(this.cameraFocusId) : undefined) ??
+      (focusId !== null ? this.castHeadHeights.get(focusId) : undefined) ??
       (heads.length === 1 ? heads[0] : tallest);
 
     // 奥行きはキャラの立ち位置に合わせる（カメラは注視点から手前へ distance 離れる）
     const zs = this.castIds.map((id) => this.castDepths.get(id) ?? 0);
     const centerZ = zs.length > 0 ? (Math.min(...zs) + Math.max(...zs)) / 2 : 0;
-    const focusZ = (this.cameraFocusId !== null ? this.castDepths.get(this.cameraFocusId) : undefined) ?? centerZ;
+    const focusZ = (focusId !== null ? this.castDepths.get(focusId) : undefined) ?? centerZ;
     const shot = this.timelineShot ?? this.cameraShot;
     const rig = { ...DEFAULT_SHOT_RIGS[shot], ...this.locationStage?.camera?.[shot] };
 
@@ -1789,6 +1849,8 @@ export class StageManager {
   /** 構図の値からカメラの位置と注視点を決め、構図のレンズと視線の先の余白を当てる */
   private shotPose(frame: ReturnType<StageManager['shotFrame']>): CameraPose {
     const pose = this.rigPose(frame);
+    // 肩越しは手前の人に合わせてカメラを置くので、レンズは画角を狭めるだけにする
+    if (frame.shot === 'ots') return pose;
     const lens = this.shotLens(frame);
     // 被写体の大きさを保ったまま、望遠ほどカメラを離す（画角は shotFov で狭める）
     if (lens !== 1) pose.position.sub(pose.target).multiplyScalar(lens).add(pose.target);
@@ -1810,42 +1872,86 @@ export class StageManager {
     return frame.rig.lens ?? 1;
   }
 
-  /** 構図の画角。場所の画角を、レンズの倍率だけ狭める（広げる） */
+  /**
+   * 構図の画角。基準の画角を、レンズの倍率だけ狭める（広げる）。
+   * 基準は、場所を見せる構図（wide・medium・side）は場所の画角、顔を撮る構図（speaker・close・ots）は
+   * 標準の画角にする（広い画角の場所でも、顔の寄り具合とパースがほかの場所と同じになる）
+   */
   private shotFov(frame: ReturnType<StageManager['shotFrame']>): number {
-    const base = this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
+    const face = frame.shot === 'speaker' || frame.shot === 'close' || frame.shot === 'ots';
+    const base = face ? DEFAULT_CAMERA_FOV : (this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV);
     const lens = this.shotLens(frame);
     return lens === 1 ? base : THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(base) / 2) / lens));
   }
 
   /** 寄っている相手が画面のどちら側（右 1・左 -1）を見ているか。カメラや正面を見ているなら 0 */
   private lookSide(): number {
-    const id = this.cameraFocusId;
-    if (!id) return 0;
-    const target = this.gaze.get(id)?.target;
-    const other =
-      target === 'speaker' ? this.speakerId
-      : target === 'partner' ? (this.speakerId && this.speakerId !== id ? this.speakerId : this.castIds.find((o) => o !== id))
-      : target && this.castIds.includes(target) ? target
-      : null;
-    if (!other || other === id) return 0;
+    const id = this.focusId();
+    const other = id ? this.lookedAtId(id) : null;
+    if (!id || !other) return 0;
     const dx = (this.castPositions.get(other) ?? 0) - (this.castPositions.get(id) ?? 0);
     return Math.abs(dx) < 0.05 ? 0 : Math.sign(dx);
   }
 
+  /**
+   * 構図の値を測る基準。カメラは cam から dir へ distance、side へ offset、上へ height 離し、
+   * 注視点は target から上へ targetHeight（dir・side は水平の単位ベクトル）
+   */
+  private shotBasis(frame: ReturnType<StageManager['shotFrame']>): { cam: THREE.Vector3; dir: THREE.Vector3; side: THREE.Vector3; target: THREE.Vector3 } {
+    const { x, z, head } = frame;
+    const focus = new THREE.Vector3(x, head, z);
+    const sideOf = (dir: THREE.Vector3) => new THREE.Vector3(dir.z, 0, -dir.x);
+    if (frame.shot === 'side') {
+      // 横から：カメラを話者の左横・少し手前に置き、話者の少し前を見る（話者は画面の左寄りに横向きで映る）
+      const dir = new THREE.Vector3(-1, 0, 0);
+      return {
+        cam: new THREE.Vector3(x, head, z + SIDE_SHOT_FORWARD),
+        dir,
+        side: sideOf(dir),
+        target: new THREE.Vector3(x - SIDE_SHOT_LEAD, head, z + SIDE_SHOT_FORWARD),
+      };
+    }
+    const focusId = this.focusId();
+    if (frame.shot === 'ots') {
+      const over = this.overId(focusId);
+      if (over) {
+        // 肩越し：手前の人の後ろ（寄る相手と反対側）へ下がり、舞台の手前側へずらして肩越しに寄る相手を見る
+        const near = new THREE.Vector3(this.castPositions.get(over) ?? 0, this.castHeadHeights.get(over) ?? 1.42, this.castDepths.get(over) ?? 0);
+        const toFocus = new THREE.Vector3(focus.x - near.x, 0, focus.z - near.z);
+        if (toFocus.lengthSq() > 1e-6) {
+          const dir = toFocus.normalize().negate();
+          const side = sideOf(dir);
+          if (side.z < 0) side.negate();
+          return { cam: near, dir, side, target: focus };
+        }
+      }
+    }
+    // 正面から。寄る相手が誰かを見ていれば、その視線の向きへ回り込む（真横より後ろへは回らない）
+    const dir = new THREE.Vector3(0, 0, 1);
+    const looking = focusId && frame.rig.orbit ? this.lookedAtId(focusId) : null;
+    if (looking && focusId) {
+      const gx = (this.castPositions.get(looking) ?? 0) - x;
+      const gz = (this.castDepths.get(looking) ?? 0) - z;
+      if (Math.hypot(gx, gz) > 0.05) {
+        const angle = THREE.MathUtils.clamp(Math.atan2(gx, gz), -Math.PI / 2, Math.PI / 2);
+        dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), angle * frame.rig.orbit!);
+      }
+    }
+    return { cam: focus.clone(), dir, side: sideOf(dir), target: focus };
+  }
+
   /** 構図の値（距離・高さ）そのままのカメラの位置と注視点 */
   private rigPose(frame: ReturnType<StageManager['shotFrame']>): CameraPose {
-    const { rig, x, z, head } = frame;
-    const distance = rig.distance + frame.extraDistance;
-    return frame.shot === 'side'
-      ? {
-          // 横から：カメラを話者の左横・少し手前に置き、話者の少し前を見る（話者は画面の左寄りに横向きで映る）
-          position: new THREE.Vector3(x - distance, head + rig.height, z + SIDE_SHOT_FORWARD),
-          target: new THREE.Vector3(x - SIDE_SHOT_LEAD, head + rig.targetHeight, z + SIDE_SHOT_FORWARD),
-        }
-      : {
-          position: new THREE.Vector3(x, head + rig.height, z + distance),
-          target: new THREE.Vector3(x, head + rig.targetHeight, z),
-        };
+    const { rig } = frame;
+    const basis = this.shotBasis(frame);
+    const position = basis.cam
+      .clone()
+      .addScaledVector(basis.dir, rig.distance + frame.extraDistance)
+      .addScaledVector(basis.side, rig.offset ?? 0);
+    position.y += rig.height;
+    const target = basis.target.clone();
+    target.y += rig.targetHeight;
+    return { position, target };
   }
 
   /**
@@ -1855,19 +1961,27 @@ export class StageManager {
   public getShotRigPlane(): { shot: CameraShot; targetX: number; targetZ: number; azimuth: number } {
     const frame = this.shotFrame();
     const { target } = this.shotPose(frame);
-    return { shot: frame.shot, targetX: target.x, targetZ: target.z, azimuth: frame.shot === 'side' ? -Math.PI / 2 : 0 };
+    const { dir } = this.shotBasis(frame);
+    return { shot: frame.shot, targetX: target.x, targetZ: target.z, azimuth: Math.atan2(dir.x, dir.z) };
   }
 
   /** カメラの位置と注視点から、今の構図の値（距離・カメラの高さ・注視点の高さ）を逆算する */
   public shotRigFromPose(position: THREE.Vector3, target: THREE.Vector3): { shot: CameraShot; rig: ShotRig } {
     const frame = this.shotFrame();
     // レンズで離した分を戻して、構図の値の位置にする
-    const lens = this.shotLens(frame);
+    const lens = frame.shot === 'ots' ? 1 : this.shotLens(frame);
     if (lens !== 1) position = position.clone().sub(target).divideScalar(lens).add(target);
-    const distance = frame.shot === 'side' ? frame.x - position.x : position.z - frame.z;
+    const basis = this.shotBasis(frame);
+    const relative = position.clone().sub(basis.cam);
     return {
       shot: frame.shot,
-      rig: { ...frame.rig, distance: distance - frame.extraDistance, height: position.y - frame.head, targetHeight: target.y - frame.head },
+      rig: {
+        ...frame.rig,
+        distance: relative.dot(basis.dir) - frame.extraDistance,
+        ...(frame.rig.offset !== undefined ? { offset: relative.dot(basis.side) } : {}),
+        height: relative.y,
+        targetHeight: target.y - basis.target.y,
+      },
     };
   }
 
@@ -1880,10 +1994,10 @@ export class StageManager {
       ? { position: new THREE.Vector3(...direct.position), target: new THREE.Vector3(...direct.target) }
       : this.shiftPose(this.shotPose(frame), this.currentShift());
     const fov = direct ? (direct.fov ?? this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV) : this.shotFov(frame);
-    // 直接指定の画角も、場所の画角より狭ければ望遠としてぼかしを強める
+    // 場所の画角より狭いほど、望遠としてぼかしを強める
     const locationFov = this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
     const halfTan = (deg: number) => Math.tan(THREE.MathUtils.degToRad(deg) / 2);
-    this.cameraLens = direct ? halfTan(locationFov) / halfTan(fov) : this.shotLens(frame);
+    this.cameraLens = halfTan(locationFov) / halfTan(fov);
     this.baseFov = fov;
     if (this.camera.fov !== fov) {
       this.camera.fov = fov;
@@ -1891,7 +2005,7 @@ export class StageManager {
     }
     // 構図が変わったらカメラを切り替える（アニメのカット割り）。秒数の指定があるときだけ動かす。
     // 同じ構図のまま立ち位置が変わったときは追いかける（カットの頭は読み込みで位置が決まるだけなので合わせる）
-    const framing = JSON.stringify([frame.shot, this.cameraFocusId, this.currentShift(), direct, this.currentLocationId]);
+    const framing = JSON.stringify([frame.shot, this.focusId(), frame.shot === 'ots' ? this.overId(this.focusId()) : null, this.currentShift(), direct, this.currentLocationId]);
     const reframed = framing !== this.cameraFraming;
     this.cameraFraming = framing;
     const settling = this.clock.elapsedTime - this.cutStartedAt < CUT_SETTLE_SEC;

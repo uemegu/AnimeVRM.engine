@@ -216,7 +216,10 @@ export type TimeOfDayPreset = z.infer<typeof TimeOfDayPreset>;
 
 const layerPosition = (ja: string, en: string) => vec3(ja, en, -5, 5, 0.05);
 
-/** カメラ構図ごとの置き方（高さは登場キャラの頭の高さからの差。side の distance は横の距離） */
+/**
+ * カメラ構図ごとの置き方（高さは登場キャラの頭の高さからの差。side の distance は横の距離。
+ * ots の distance は手前の人の後ろへ下がる距離、高さは手前の人の頭から）
+ */
 export interface ShotRig {
   distance: number;
   height: number;
@@ -226,16 +229,25 @@ export interface ShotRig {
    * 1 より大きいと望遠（顔のパースがゆがまず、背景が詰まってぼける）、小さいと広角（空間が広く見える）
    */
   lens?: number;
+  /** ots：手前の人の真後ろから横（舞台の手前側）へずらす距離。肩が画面の端にかかる */
+  offset?: number;
+  /**
+   * 寄る相手が誰かを見ているとき、正面からその視線の向きへ回り込む割合（0 = 正面、1 = 視線の向き）。
+   * 0.5 なら顔を斜め前から撮る
+   */
+  orbit?: number;
 }
 
 /** 構図の既定値（場所で指定がなければこれを使う） */
-export const DEFAULT_SHOT_RIGS: Record<'wide' | 'medium' | 'speaker' | 'close' | 'side', ShotRig> = {
+export const DEFAULT_SHOT_RIGS: Record<'wide' | 'medium' | 'speaker' | 'close' | 'side' | 'ots', ShotRig> = {
   wide: { distance: 2.3, height: -0.22, targetHeight: -0.37, lens: 0.8 },
   medium: { distance: 2.2, height: -0.2, targetHeight: -0.3 },
   speaker: { distance: 1.6, height: -0.17, targetHeight: -0.27, lens: 1.25 },
-  close: { distance: 1.2, height: -0.09, targetHeight: -0.14, lens: 1.8 },
+  close: { distance: 1.2, height: -0.09, targetHeight: -0.14, lens: 1.8, orbit: 0.5 },
   // 歩きながらの会話（カメラを話者の左横・少し手前に置き、話者が画面の左から3割ほどに横向きで映る）
   side: { distance: 1.3, height: -0.17, targetHeight: -0.12 },
+  // 肩越し（手前の人の肩の後ろから、向かいの人を撮る）。カメラは手前の人に合わせて置き、レンズは画角だけを狭める
+  ots: { distance: 1.0, height: 0.05, targetHeight: -0.02, lens: 1.5, offset: 0.45 },
 };
 export const DEFAULT_CAMERA_FOV = 32;
 export const DEFAULT_SLOT_POSITIONS: Record<'left' | 'center' | 'right', [number, number, number]> = {
@@ -253,6 +265,8 @@ const shotRig = (ja: string, en: string, def: ShotRig) =>
     height: num('カメラの高さ（頭から）', 'Height (from head)', -1.2, 1, 0.01, def.height),
     targetHeight: num('注視点の高さ（頭から）', 'Look-at height (from head)', -1.2, 1, 0.01, def.targetHeight),
     lens: num('レンズ（焦点距離の倍率。1 で場所の画角のまま）', 'Lens (focal length ×, 1 keeps the location FOV)', 0.5, 3, 0.05, def.lens ?? 1).optional(),
+    offset: num('横へのずらし（肩越しで、手前の人の後ろから）', 'Sideways offset (over-the-shoulder, behind the near character)', -1.5, 1.5, 0.05, def.offset ?? 0).optional(),
+    orbit: num('視線の向きへの回り込み（0 で正面）', 'Turn toward the gaze (0 = front)', 0, 1, 0.05, def.orbit ?? 0).optional(),
   });
 
 const slot = (ja: string, en: string, def: [number, number, number]) =>
@@ -302,6 +316,7 @@ export const LocationStage = group('配置とカメラ', 'Staging & camera', {
     speaker: shotRig('話者', 'Speaker', DEFAULT_SHOT_RIGS.speaker).optional(),
     close: shotRig('アップ', 'Close', DEFAULT_SHOT_RIGS.close).optional(),
     side: shotRig('横から', 'From the side', DEFAULT_SHOT_RIGS.side).optional(),
+    ots: shotRig('肩越し', 'Over the shoulder', DEFAULT_SHOT_RIGS.ots).optional(),
     /** 注視点（話者の顔あたり）にピントを合わせ、離れた物を距離に応じてぼかす。なければぼかさない */
     depthOfField: group('背景ぼかし', 'Depth of field', {
       aperture: num('ぼけの強さ（レンズの口径 m）', 'Aperture (m)', 0, 0.2, 0.005, DEFAULT_DEPTH_OF_FIELD.aperture),
