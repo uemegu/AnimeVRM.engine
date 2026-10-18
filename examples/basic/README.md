@@ -1,11 +1,14 @@
 # basic
 
-何もない空間（時間帯の空だけ）にアバター（アオイ）を1人立たせるだけの例。
+白い床だけの空間にアバター（アオイ）を1人立たせる例。マウスのドラッグでカメラを回し、ホイールで寄る・引く。
 
 ```bash
+npm install
 npm run example
 ```
 
 http://localhost:5192 を開く。
 
-モデル（`/models/aoi/aoi-school.vrm`）と待機モーション（`/animations/Standing Idle.fbx`）はこのリポジトリに含まない。既定では AnimeVRM の `assets/`（このリポジトリを `packages/engine` に置いたときの `../../assets`）から読む。別の場所から読むときは `ASSETS_DIR=/path/to/assets npm run example` とし、`main.ts` の `modelUrl` を手元の VRM に変える。
+- モデルは `public/models/aoi-school.vrm`（このリポジトリに同梱）。
+- 待機モーションの FBX は使わず、`configureAssets({ idleMotion: null })` で腕を下ろした姿勢で立たせる。
+- 床は `registerEnvironment` で登録した3D背景（`builtin:white-floor`）。

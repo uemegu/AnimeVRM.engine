@@ -4,7 +4,7 @@ VRM をアニメ調に描画するエンジン（Three.js / @pixiv/three-vrm）�
 
 ## 使い方
 
-最小の例は [examples/basic](examples/basic)（`npm run example`。何もない空間にアバターを1人立たせる）。
+最小の例は [examples/basic](examples/basic)（`npm run example`。白い床の上にアバターを1人立たせ、マウスでカメラを回せる。モデルは同梱）。
 
 ```ts
 import { StageManager } from '@anime-vrm/engine/stage/StageManager';
@@ -12,6 +12,7 @@ import { configureAssets } from '@anime-vrm/engine/utils/path';
 
 // 素材の置き場所（省略時は Vite の BASE_URL、モーションは /animations/<名前>.fbx）
 configureAssets({ motionUrl: (name) => `/motions/${name}.fbx`, idleMotion: 'Standing Idle' });
+// 待機モーションの FBX を使わないなら idleMotion: null（腕を下ろした姿勢で立つ）
 ```
 
 - 描画に渡す形（舞台のキャラ・カメラ・演出・カットの状態）は `schema/stage.ts`、見た目の設定（時間帯・場所）は `schema/visual.ts`。

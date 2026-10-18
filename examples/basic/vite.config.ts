@@ -1,14 +1,9 @@
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
-const here = dirname(fileURLToPath(import.meta.url));
-
-// モデル・モーションの置き場所。既定は AnimeVRM（packages/engine をサブモジュールにしているリポジトリ）の assets/
-const assets = process.env.ASSETS_DIR ?? resolve(here, '../../../../assets');
-
+// 素材（モデル）は examples/basic/public に置いてある
 export default defineConfig({
-  root: here,
-  publicDir: assets,
+  root: dirname(fileURLToPath(import.meta.url)),
   server: { port: 5192 },
 });

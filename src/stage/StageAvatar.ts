@@ -348,7 +348,7 @@ export class StageAvatar {
     this.clothDentEnabled = options.clothDent ?? true;
   }
 
-  public async load(modelUrl: string, defaultAnimationUrl = idleMotionUrl()): Promise<VRM> {
+  public async load(modelUrl: string, defaultAnimationUrl: string | null = idleMotionUrl()): Promise<VRM> {
     const loader = new GLTFLoader();
     loader.register((parser) => new VRMLoaderPlugin(parser));
 
@@ -416,12 +416,20 @@ export class StageAvatar {
     });
   }
 
+  /** url が null なら、モーションを止めて腕を下ろした姿勢にする（待機モーションを使わないとき） */
   public async playAnimation(
-    url: string,
+    url: string | null,
     loop: boolean = true,
     crossFadeDuration: number = 0.5
   ): Promise<THREE.AnimationAction | null> {
     if (!this.vrm || !this.mixer) return null;
+    if (url === null) {
+      this.mixer.stopAllAction();
+      this.currentAction = null;
+      this.currentAnimationUrl = null;
+      this.applyRestPose();
+      return null;
+    }
 
     // 同じモーションでも、ループのする・しないが変わったら再生し直す
     if (this.currentAnimationUrl === url && this.currentAction?.isRunning() && (this.currentAction.loop === THREE.LoopRepeat) === loop) {
@@ -457,6 +465,17 @@ export class StageAvatar {
       return null;
     }
   }
+  /** 腕を下ろした姿勢（VRM の基本の T ポーズから、上腕を体の横へ下ろす） */
+  private applyRestPose(): void {
+    const humanoid = this.vrm?.humanoid;
+    if (!humanoid) return;
+    humanoid.resetNormalizedPose();
+    humanoid.getNormalizedBoneNode('leftUpperArm')?.rotation.set(0, 0, -1.2);
+    humanoid.getNormalizedBoneNode('rightUpperArm')?.rotation.set(0, 0, 1.2);
+    humanoid.getNormalizedBoneNode('leftLowerArm')?.rotation.set(0, -0.15, 0);
+    humanoid.getNormalizedBoneNode('rightLowerArm')?.rotation.set(0, 0.15, 0);
+  }
+
 
   /** 日なたの明るさ（暗い室内から見た窓の外の人物など。0 で場の光だけ） */
   /** 髪とスカートを揺らす風（場所の wind）。null で止む */

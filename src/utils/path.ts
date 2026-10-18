@@ -2,12 +2,12 @@
  * 素材の置き場所の設定。
  * - base: 素材のパス（/textures/... など）の前に付ける基準。省略時は Vite の BASE_URL（なければ /）
  * - motionUrl: モーション名から FBX の URL を作る
- * - idleMotion: モーションの指定がないときの待機モーション
+ * - idleMotion: モーションの指定がないときの待機モーション。null なら FBX を読まず、腕を下ろした姿勢で立つ
  */
 export interface AssetConfig {
   base: string;
   motionUrl: (name: string) => string;
-  idleMotion: string;
+  idleMotion: string | null;
 }
 
 const assetConfig: AssetConfig = {
@@ -26,9 +26,9 @@ export function motionUrl(motion: string): string {
   return /^(blob:|data:|https?:|\/)/.test(motion) ? motion : assetConfig.motionUrl(motion);
 }
 
-/** 待機モーションの URL */
-export function idleMotionUrl(): string {
-  return motionUrl(assetConfig.idleMotion);
+/** 待機モーションの URL（null は待機モーションなし） */
+export function idleMotionUrl(): string | null {
+  return assetConfig.idleMotion === null ? null : motionUrl(assetConfig.idleMotion);
 }
 
 /**
