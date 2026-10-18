@@ -9,7 +9,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build:wasm": "asc assembly/index.ts --config asconfig.json",
-    "example": "vite --config examples/basic/vite.config.ts"
+    "example": "vite --config examples/basic/vite.config.ts",
+    "build:example": "vite build --config examples/basic/vite.config.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"

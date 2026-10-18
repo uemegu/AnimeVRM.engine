@@ -10,7 +10,11 @@ VRM のキャラクターをアニメ調に描画する、Three.js / @pixiv/thre
 
 ## 例
 
-[examples/basic](examples/basic) は、白い床の上にキャラを1人立たせ、マウスでカメラを回せる例です。
+[examples/basic](examples/basic) は、グレーの床の上にキャラを1人立たせ、マウスでカメラを回せる例です。VRM ファイルをドロップすると差し替わります。
+
+ブラウザで開く：https://uemegu.github.io/AnimeVRM.engine/
+
+手元で動かすとき：
 
 ```bash
 npm install
