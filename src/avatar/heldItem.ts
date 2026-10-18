@@ -4,7 +4,7 @@ import { forEachVertex, mainBone, measureHand, restPosition, skinPart } from './
 import { reach } from './handClearance';
 
 /**
- * 手に持つ小物の持たせ方。小物の形は registerHeldItem で登録する（AnimeVRM の小物は @anime-vrm/content）。
+ * 手に持つ小物の持たせ方。小物の形は registerHeldItem で登録する。
  * 骨の向きはモデルごとに違うので、毎フレーム、手首と指の付け根の位置から手のひらの向きを求めて置く。
  * 持つ手の指（親指を含む）は、モーションの指の形を捨てて小物に合わせた形にする。
  * 寸法は実物の大きさで作り、キャラの手の大きさに合わせて縮める（アニメ調のモデルは手が小さい）。

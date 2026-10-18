@@ -8,7 +8,7 @@ export interface BuiltinEnvironment {
   dispose: (group: THREE.Group) => void;
 }
 
-/** 組み込みの3D背景（builtin:<名前>）。中身は利用側が registerEnvironment で登録する（AnimeVRM のセットは @anime-vrm/content） */
+/** 組み込みの3D背景（builtin:<名前>）。registerEnvironment で登録する */
 const BUILTINS = new Map<string, BuiltinEnvironment>();
 
 export function registerEnvironment(name: string, environment: BuiltinEnvironment): void {

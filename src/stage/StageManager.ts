@@ -71,9 +71,9 @@ function easeInOutCubic(t: number): number {
 }
 
 export interface StagePresets {
-  /** 時間帯ごとの見た目（assets/studio/time-of-day.json） */
+  /** 時間帯ごとの見た目（キー: 時間帯の ID） */
   timeOfDay: Record<string, TimeOfDayPreset>;
-  /** 場所ごとの背景（assets/studio/locations.json） */
+  /** 場所ごとの背景（キー: 場所の ID） */
   locations: Record<string, LocationVisualPreset>;
 }
 
@@ -86,7 +86,7 @@ export interface StageOptions {
   getSpeakerMouthOpen?: () => number;
   /**
    * カット内の時刻（ボイスの再生位置など）。指定すると毎フレームこの時刻でタイムラインを進める。
-   * undefined を返したときはカット開始からの経過秒数を使う（Studio のように自分で setCutTime する場合は指定しない）
+   * undefined を返したときはカット開始からの経過秒数を使う（自分で setCutTime する場合は指定しない）
    */
   getCutTime?: () => number | undefined;
   initialTimeOfDay?: TimeOfDayId;
@@ -219,19 +219,19 @@ export class StageManager {
   private basePose: CameraPoseSetting | null = null;
   /** タイムラインで切り替えた構図・カメラ（カットの指定より優先） */
   private timelineShot: CameraShot | null = null;
-  /** 構図からのずらし（Studio で直接選ぶもの。カット・キーの指定が優先） */
+  /** 構図からのずらし（setCameraShift で選んだもの。カット・キーの指定が優先） */
   private cameraShift: CameraShift | null = null;
   private timelineShift: CameraShift | null = null;
   private timelinePose: { pose: CameraPoseSetting; duration?: number } | null = null;
   private cameraTransitionSec = CAMERA_TRANSITION_SEC;
   /** カットのカメラの動き（パン・ドリーなど。構図に重ねる） */
   private cameraMove: ResolvedCameraMove | null = null;
-  /** Studio のビューアで試すカメラの動き（at は clock の時刻。カットの動きがあればそちらが優先） */
+  /** previewCameraMove で試すカメラの動き（at は clock の時刻。カットの動きがあればそちらが優先） */
   private previewMove: ResolvedCameraMove | null = null;
   /** 構図の画角（ズームなどの動きはこれを基準に変える） */
   private baseFov = DEFAULT_CAMERA_FOV;
   private readonly cameraBasePosition = new THREE.Vector3();
-  /** Studio でカメラを手で動かしている間は、構図によるカメラの移動を止める */
+  /** カメラを手で動かしている間は、構図によるカメラの移動を止める */
   private freeCamera = false;
 
   // カット内のタイムライン（キーフレーム）
@@ -521,7 +521,7 @@ export class StageManager {
     this.scene.add(this.neargroundMesh);
   }
 
-  /** シーン設定を差し替えて、今の時間帯・場所に当て直す（Studio での編集をその場で反映する） */
+  /** 時間帯・場所の設定を差し替えて、今の時間帯・場所に当て直す（設定の編集をその場で反映する） */
   public setPresets(presets: StagePresets): void {
     const previous = this.presets;
     this.presets = presets;
@@ -718,12 +718,12 @@ export class StageManager {
     }
   }
 
-  /** Studio の俯瞰表示用：今のカメラ（読み取りだけに使う） */
+  /** 今のカメラ。手で動かすとき（setFreeCamera）以外は読み取りだけに使う */
   public get viewCamera(): THREE.PerspectiveCamera {
     return this.camera;
   }
 
-  /** Studio の俯瞰表示用：登場中のキャラの立ち位置・向き・頭の高さ */
+  /** 登場中のキャラの立ち位置・向き・頭の高さ */
   public getCastLayout(): Array<{ id: string; position: [number, number, number]; rotationY: number; headHeight: number }> {
     return this.castIds.flatMap((id) => {
       const root = this.loadedAvatars.get(id)?.vrm?.scene;
@@ -749,7 +749,7 @@ export class StageManager {
     this.skyBackground.material.uniforms.uExposure.value = exposure;
     this.backdropMesh.material.color.setScalar(exposure);
     this.backdropMesh.visible = inWorld && !scrolling;
-    // 背景を流している間は中景も出さない（旧ルートと同じ。流れる背景の手前に止まった中景が残らないように）
+    // 背景を流している間は中景も出さない（流れる背景の手前に止まった中景が残らないように）
     if (this.midgroundMesh) this.midgroundMesh.visible = !scrolling;
     if (inWorld) {
       const image = texture.image as { width?: number; height?: number } | undefined;
@@ -762,7 +762,7 @@ export class StageManager {
   }
 
   /**
-   * 中景・近景はカメラの前に貼り付ける（旧ルートと同じ置き方。中景は注視点の少し奥、近景は手前に置き、
+   * 中景・近景はカメラの前に貼り付ける（中景は注視点の少し奥、近景は手前に置き、
    * 画面の高さに合わせて大きさを決める。位置は画面上のずれ）
    */
   private updateLayerPlacement(): void {
@@ -1139,16 +1139,16 @@ export class StageManager {
    * すでに同じキャラが別のモデルで読み込み済みなら（入れ替えになるので）触らない
    */
   /**
-   * シナリオ1本が使う素材（collectScenarioAssets の結果）を、再生を始める前にまとめて読み込む。
+   * これから使う素材（ファイル・モーション・3D背景・キャラ）を、再生を始める前にまとめて読み込む。
    * 3Dキャラとモーションは描画の準備まで、3D背景は組み立てまで、そのほかのファイルはメモリへ。
-   * 前のシナリオの分は手放す
+   * 前に読み込んだ分は手放す
    */
   public async preloadScenario(assets: { files: string[]; motions: string[]; environments: string[]; avatars: { id: string; modelUrl: string }[] }): Promise<void> {
     const releasePrevious = this.releasePreloadedAssets;
     this.releasePreloadedAssets = null;
     const parsed = new Set(assets.avatars.map((a) => a.modelUrl));
     const files = assets.files.filter((file) => !parsed.has(file));
-    // 前のシナリオの分は、同じ素材を読み直さないよう新しい分を押さえてから手放す
+    // 前に読み込んだ分は、同じ素材を読み直さないよう新しい分を押さえてから手放す
     const release = preloadAssets(files).then((fn) => {
       releasePrevious?.();
       if (this.isDisposed) fn();
@@ -1321,7 +1321,7 @@ export class StageManager {
 
   /** モーション再生。1回きりのモーションは終わったら待機モーションへ戻す（止め絵のポーズは保つ） */
   private playMotion(id: string, avatar: StageAvatar, motion: string | undefined, loop: boolean, cue = '', offsetSec = 0): void {
-    // モーション名（置き場所は configureAssets の motionUrl）のほか、URL（Studio で生成した直後の FBX など）も受け付ける
+    // モーション名（置き場所は configureAssets の motionUrl）のほか、URL（生成した直後の FBX の blob URL など）も受け付ける
     const url = !motion ? idleMotionUrl() : motionUrl(motion);
     // 指定が変わった時だけ再生する（1回きりの身振りが待機に戻った後、同じ指定で再生し直さない）
     const key = `${url}|${loop}|${cue}`;
@@ -1405,7 +1405,7 @@ export class StageManager {
   }
 
   /** カメラ構図の指定（focusId は話者など、寄る対象） */
-  /** Studio 用：カメラを手で動かす間は構図の自動決定を止める（戻すと今の構図へ動く） */
+  /** カメラを手で動かす間は構図の自動決定を止める（戻すと今の構図へ動く） */
   public setFreeCamera(enabled: boolean): void {
     this.freeCamera = enabled;
     if (!enabled) {
@@ -1414,7 +1414,7 @@ export class StageManager {
     }
   }
 
-  /** Studio 用：手で動かしたカメラの注視点を伝える（戻したときにそこから補間する） */
+  /** 手で動かしたカメラの注視点を伝える（戻したときにそこから補間する） */
   public setFreeCameraTarget(target: THREE.Vector3): void {
     this.cameraCurrentTarget.copy(target);
   }
@@ -1472,7 +1472,7 @@ export class StageManager {
     this.updateCameraTarget();
   }
 
-  /** Studio のビューア用：カットとは別に、カメラの動きを今から試す（null で止める） */
+  /** カットとは別に、カメラの動きを今から試す（null で止める） */
   public previewCameraMove(move: ResolvedCameraMove | null): void {
     this.previewMove = move ? { ...move, at: this.clock.elapsedTime } : null;
   }
@@ -1492,7 +1492,7 @@ export class StageManager {
     this.applyCutState(false);
   }
 
-  /** カットの切り替え演出（暗転・瞼）をもう一度見せる（Studio で先頭から再生したとき） */
+  /** カットの切り替え演出（暗転・瞼）をもう一度見せる（カットを先頭から再生し直したとき） */
   public replayScreenTransition(): void {
     this.screenEffects?.playTransition(this.cut?.screenTransition ?? null);
   }
@@ -1741,7 +1741,7 @@ export class StageManager {
   }
 
   /**
-   * Studio 用：構図の値を手で調整するときに、カメラが動ける面。注視点の水平位置は固定し、
+   * 構図の値を手で調整するときに、カメラが動ける面。注視点の水平位置は固定し、
    * カメラは構図の向き（azimuth。OrbitControls と同じ、+z から +x へ回る角度）からだけ見る
    */
   public getShotRigPlane(): { shot: CameraShot; targetX: number; targetZ: number; azimuth: number } {
@@ -1750,7 +1750,7 @@ export class StageManager {
     return { shot: frame.shot, targetX: target.x, targetZ: target.z, azimuth: frame.shot === 'side' ? -Math.PI / 2 : 0 };
   }
 
-  /** Studio 用：カメラの位置と注視点から、今の構図の値（距離・カメラの高さ・注視点の高さ）を逆算する */
+  /** カメラの位置と注視点から、今の構図の値（距離・カメラの高さ・注視点の高さ）を逆算する */
   public shotRigFromPose(position: THREE.Vector3, target: THREE.Vector3): { shot: CameraShot; rig: ShotRig } {
     const frame = this.shotFrame();
     const distance = frame.shot === 'side' ? frame.x - position.x : position.z - frame.z;

@@ -1,27 +1,69 @@
 # AnimeVRM engine
 
-VRM をアニメ調に描画するエンジン（Three.js / @pixiv/three-vrm）。トゥーンシェーダー、ポストプロセス、感情演出、舞台（`stage/StageManager`）を持つ。シナリオの形式には依存しない。
+VRM のキャラクターをアニメ調に描画する、Three.js / @pixiv/three-vrm 用のライブラリです。
 
-## 使い方
+- トゥーンシェーダー（顔の陰影、髪の影、輪郭線）
+- ポストプロセス（光のにじみ、光条、被写界深度、色調）
+- 感情の演出（赤面、涙、汗、漫画風の文字、集中線）
+- 時間帯ごとの光と空、背景の絵、3D の背景
+- 複数のキャラの配置、カメラの構図と動き、ボイスに合わせた口の動き
 
-最小の例は [examples/basic](examples/basic)（`npm run example`。白い床の上にアバターを1人立たせ、マウスでカメラを回せる。モデルは同梱）。
+## 例
+
+[examples/basic](examples/basic) は、白い床の上にキャラを1人立たせ、マウスでカメラを回せる例です。
+
+```bash
+npm install
+npm run example
+```
+
+http://localhost:5192 を開きます。
+
+## 基本の使い方
 
 ```ts
 import { StageManager } from '@anime-vrm/engine/stage/StageManager';
-import { configureAssets } from '@anime-vrm/engine/utils/path';
 
-// 素材の置き場所（省略時は Vite の BASE_URL、モーションは /animations/<名前>.fbx）
-configureAssets({ motionUrl: (name) => `/motions/${name}.fbx`, idleMotion: 'Standing Idle' });
-// 待機モーションの FBX を使わないなら idleMotion: null（腕を下ろした姿勢で立つ）
+const stage = new StageManager({
+  canvas,
+  presets: { timeOfDay: { day }, locations: { room } },
+  initialTimeOfDay: 'day',
+  initialLocationId: 'room',
+});
+stage.resize(canvas.clientWidth, canvas.clientHeight);
+
+await stage.setCast([
+  { id: 'aoi', modelUrl: '/models/aoi.vrm', slot: 'center', expression: 'happy', expressionWeight: 1, motionLoop: true },
+]);
+stage.setCameraShot('wide', 'aoi');
 ```
 
-- 描画に渡す形（舞台のキャラ・カメラ・演出・カットの状態）は `schema/stage.ts`、見た目の設定（時間帯・場所）は `schema/visual.ts`。
-- カットのタイムラインは `StageManager.setCutTimeline({ stateAt, screenTransition, cameraShift, innerVoice })` で渡す。
-- 中身は外から登録する：
-  - 組み込みの3D背景（`builtin:<名前>`）… `registerEnvironment`（`stage/environments.ts`）
-  - 手に持つ小物 … `registerHeldItem`（`avatar/heldItem.ts`）
-  - 濡れた服の絵柄 … `registerWetTexture`（`shader/WetCloth.ts`）
+- `presets.timeOfDay` は時間帯ごとの光・ポストプロセスの設定、`presets.locations` は場所ごとの背景の設定です。項目は `src/schema/visual.ts` にあります。`examples/basic/day.json` が昼の設定の例です。
+- `setCast` に渡すキャラの項目（立ち位置、表情、モーション、視線、演出など）は `src/schema/stage.ts` の `StageCastMember` です。
+- カメラの構図は `setCameraShot`（`wide` / `medium` / `speaker` / `close` / `side`）で選びます。手で動かすときは `setFreeCamera(true)` にして `viewCamera` を操作します。
 
-口パク解析の WASM（`assembly/` → `src/audio/lipsync.wasm`、`npm run build:wasm`）と、顔に重ねる絵は同梱している（`new URL(..., import.meta.url)` で読む）。
+## 素材の置き場所
 
-AnimeVRM（Studio・シナリオ・デモの中身）から使う例は https://github.com/uemegu/AnimeVRM 。
+```ts
+import { configureAssets } from '@anime-vrm/engine/utils/path';
+
+configureAssets({
+  base: '/',                                        // 素材のパスの前に付ける基準（省略時は Vite の BASE_URL）
+  motionUrl: (name) => `/animations/${name}.fbx`,   // モーション名から FBX の URL を作る
+  idleMotion: 'Standing Idle',                      // モーションの指定がないときの待機モーション
+});
+```
+
+`idleMotion: null` にすると、待機モーションの FBX を読まず、腕を下ろした姿勢で立ちます。
+
+## 背景・小物の登録
+
+場所や小物は、使う側で登録します。
+
+- 3D の背景：`registerEnvironment(name, { load, dispose })`（`src/stage/environments.ts`）。場所の `environment.model` に `builtin:<name>` と書くと使われます。
+- 手に持つ小物：`registerHeldItem(id, spec)`（`src/avatar/heldItem.ts`）。
+- 雨で濡れた服の絵柄：`registerWetTexture(pattern, url)`（`src/shader/WetCloth.ts`）。マテリアル名が `pattern` に合う服に使われます。
+
+## 口の動き
+
+ボイスの口の形の解析（AudioWorklet と WASM）は同梱しています。WASM を作り直すときは `npm run build:wasm` を実行します（ソースは `assembly/`）。

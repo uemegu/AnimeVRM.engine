@@ -1,5 +1,5 @@
 /**
- * 見た目（時間帯・場所）の型。中身の定義はシーン設定のスキーマ（packages/scenario/src/scene.ts）にある
+ * 見た目（時間帯・場所）の型。定義は schema/visual.ts にある
  */
 import type { FogConfig, LensFlareConfig, LightingConfig, LocationVisualPreset, MaterialStyleParams, OutlineConfig, PostProcessingConfig, SunShaftsConfig, TimeOfDayId, TimeOfDayPreset } from '../schema/visual';
 

@@ -71,7 +71,7 @@ const ScrollingBlurShader = {
   `,
 };
 
-/** 流れる背景の設定。定義はシナリオと共有するパッケージ（packages/scenario/src/stage.ts）にある */
+/** 流れる背景の設定。定義は schema/stage.ts にある */
 export type { ScrollingBackgroundSettings } from '../schema/stage';
 import type { ScrollingBackgroundSettings } from '../schema/stage';
 

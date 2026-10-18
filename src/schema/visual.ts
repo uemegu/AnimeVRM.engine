@@ -1,6 +1,6 @@
 /**
- * 見た目の設定（時間帯・場所）のスキーマ。値は利用側のデータ（AnimeVRM では assets/studio/time-of-day.json・locations.json）から渡す。
- * 各項目の meta に表示名（日英）と数値の範囲を持たせ、Studio の編集フォームはここから組み立てる。
+ * 見た目の設定（時間帯・場所）のスキーマ。
+ * 各項目の meta に表示名（日英）と数値の範囲を持たせてある（編集画面を作るときに使える）。
  */
 import { z } from 'zod';
 
@@ -239,7 +239,7 @@ export const DEFAULT_SLOT_POSITIONS: Record<'left' | 'center' | 'right', [number
   right: [0.45, 0, 0],
 };
 export const DEFAULT_DEPTH_OF_FIELD = { aperture: 0.03, maxBlur: 0.012, sharpRange: 0 } as const;
-/** 遠景の既定は3D空間に置く（旧ルートと同じく、カメラの動きで背景の見え方も変わる） */
+/** 遠景の既定は3D空間に置く（カメラの動きで背景の見え方も変わる） */
 export const DEFAULT_BACKDROP: { mode: 'screen' | 'world'; distance: number; height: number; offsetY: number } = { mode: 'world', distance: 8, height: 7.5, offsetY: 1.0 };
 
 const shotRig = (ja: string, en: string, def: ShotRig) =>
@@ -259,9 +259,9 @@ const slot = (ja: string, en: string, def: [number, number, number]) =>
  * 範囲（x, z の矩形）ごとに人数を決めてばらまく
  */
 export const LocationCrowd = z.strictObject({
-  /** モブにする VRM（assets/ 基準） */
+  /** モブにする VRM の URL */
   models: z.array(z.string()).min(1),
-  /** ポーズを取るモーション（assets/animations/<名前>.fbx。各モーションの途中の数コマを使う） */
+  /** ポーズを取るモーションの名前（configureAssets の motionUrl で URL にする。各モーションの途中の数コマを使う） */
   motions: z.array(z.string()).optional(),
   areas: z.array(z.strictObject({
     min: z.tuple([z.number(), z.number()]),
@@ -371,7 +371,7 @@ export const LocationEnvironment = group('3D背景', '3D set', {
     smokeStrength: num('花火の煙の濃さ', 'Firework smoke', 0, 1, 0.05).min(0).max(1),
     smokeLifetime: num('残煙の時間（秒）', 'Smoke lifetime (s)', 1, 20, 0.5).min(1).max(20),
   }).optional(),
-  /** builtin:<名前>、または glb の URL（assets/ 基準） */
+  /** builtin:<名前>（registerEnvironment で登録したもの）、または glb の URL */
   model: z.string().min(1).meta({ ...label('モデル', 'Model'), kind: 'environment' }),
   position: vec3('位置', 'Position', -20, 20, 0.05),
   rotationY: num('向き（度）', 'Rotation (deg)', -180, 180, 1, 0),
@@ -418,10 +418,7 @@ const SeatCamera = z.strictObject({
   fov: z.number().positive().optional(),
 });
 
-/**
- * 座れる席（机に肘をつく・ベンチに座るなど）。座りのモーションはこの席の位置でだけ使う（GEMINI.md）。
- * 台本では `<キャラ>.seat=<席の ID>` で座らせる（confession_in_5_seconds の app/scripts/compile-script.py）
- */
+/** 座れる席（机に肘をつく・ベンチに座るなど）。座りのモーションはこの席の位置に置く */
 export const LocationSeat = z.strictObject({
   name: z.string(),
   position: z.tuple([z.number(), z.number(), z.number()]),
@@ -462,7 +459,7 @@ export const LocationVisualPreset = z.strictObject({
   light: LocationLight.optional(),
   wind: LocationWind.optional(),
   stage: LocationStage.optional(),
-  /** 座れる席（キー: 席の ID。シナリオの座りのモーションの位置の確認に使う） */
+  /** 座れる席（キー: 席の ID）。座りのモーションを置く位置 */
   seats: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/), LocationSeat).optional(),
 });
 export type LocationVisualPreset = z.infer<typeof LocationVisualPreset>;

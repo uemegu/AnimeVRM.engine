@@ -1,5 +1,5 @@
 /**
- * 描画の設定の型（ToonShader と太陽の演出が使う）。値は時間帯の設定（assets/studio/time-of-day.json）から渡す
+ * 描画の設定の型（ToonShader と太陽の演出が使う）。値は時間帯の設定（TimeOfDayPreset）から渡す
  */
 
 export interface MaterialStyleParams {

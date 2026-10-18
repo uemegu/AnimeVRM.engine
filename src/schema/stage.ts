@@ -1,6 +1,5 @@
 /**
- * 描画に渡す形（舞台・カメラ・演出）。engine が受け取るものはすべてここで決め、
- * シナリオ（@anime-vrm/scenario）はこれに合わせて組み立てる。
+ * 舞台に渡す形（キャラ・カメラ・演出・カットの状態）。
  */
 import { z } from 'zod';
 
@@ -18,7 +17,7 @@ export type TextContent = z.infer<typeof TextContent>;
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 
 /**
- * カメラの構図。極端な接写は禁止（開発ルール）なので close でもバストアップまで
+ * カメラの構図。close でもバストアップまで（近すぎるとモデルの粗さが目立つ）
  * - wide: 登場キャラ全員が入る引き
  * - medium: 話者を中心に隣の人物も入る会話ショット
  * - speaker: 話者のウェストアップ（1人の場面の既定）
@@ -210,7 +209,7 @@ export interface AvatarLook {
   tearDrops?: boolean;
   anger: boolean;
   tears: boolean;
-  /** 顔に汗のテクスチャを重ねる（今はビューアの試し用で、シナリオからは指定できない） */
+  /** 顔に汗のテクスチャを重ねる */
   faceSweat?: boolean;
   /** 目が泳ぐ強さ（0 で止まる） */
   eyeWander: number;

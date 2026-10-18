@@ -82,7 +82,7 @@ export class ScreenEffects {
 
   /**
    * カットの切り替え演出。カットが変わるたびに呼ぶ（null なら瞼を開けて何もしない）。
-   * instant が true なら動きを見せずに最終の状態にする（Studio で途中の時刻へ飛んだとき）
+   * instant が true なら動きを見せずに最終の状態にする（カットの途中の時刻へ飛んだとき）
    */
   public playTransition(kind: ScreenTransitionKind | null, instant = false, ready?: () => Promise<void>): void {
     this.clearTimers();

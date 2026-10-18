@@ -1,14 +1,14 @@
 # basic
 
-白い床だけの空間にアバター（アオイ）を1人立たせる例。マウスのドラッグでカメラを回し、ホイールで寄る・引く。
+白い床の上にキャラを1人立たせる例です。ドラッグでカメラを回し、ホイールで寄ったり引いたりできます。
 
 ```bash
 npm install
 npm run example
 ```
 
-http://localhost:5192 を開く。
+http://localhost:5192 を開きます。
 
-- モデルは `public/models/aoi-school.vrm`（このリポジトリに同梱）。
-- 待機モーションの FBX は使わず、`configureAssets({ idleMotion: null })` で腕を下ろした姿勢で立たせる。
-- 床は `registerEnvironment` で登録した3D背景（`builtin:white-floor`）。
+- モデルは `public/models/aoi-school.vrm` です。
+- 待機モーションの FBX は使わず、`configureAssets({ idleMotion: null })` で腕を下ろした姿勢にしています。
+- 床は `registerEnvironment` で登録した3D の背景（`builtin:white-floor`）です。

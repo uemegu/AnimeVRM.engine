@@ -101,7 +101,7 @@ export async function loadMixamoAnimation(url: string, vrm: VRM): Promise<THREE.
     mixamorigRightLeg: 'rightLowerLeg',
     mixamorigRightFoot: 'rightFoot',
     mixamorigRightToeBase: 'rightToes',
-    // 指（旧ルートと同じ。FBX の指の動きも移す）
+    // 指（FBX の指の動きも移す）
     mixamorigLeftHandThumb1: 'leftThumbMetacarpal',
     mixamorigLeftHandThumb2: 'leftThumbProximal',
     mixamorigLeftHandThumb3: 'leftThumbDistal',
