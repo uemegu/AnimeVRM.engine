@@ -37,7 +37,7 @@ const stage = new StageManager({
 stage.resize(canvas.clientWidth, canvas.clientHeight);
 
 await stage.setCast([
-  { id: 'aoi', modelUrl: '/models/aoi.vrm', slot: 'center', expression: 'happy', expressionWeight: 1, motionLoop: true },
+  { id: 'aoi', modelUrl: '/models/aoi.vrm', slot: 'center', expression: 'neutral', expressionWeight: 1, motionLoop: true },
 ]);
 stage.setCameraShot('wide', 'aoi');
 ```

@@ -52,7 +52,7 @@ resize();
 
 /** キャラを1人立たせる。同じ id で modelUrl を変えると、前のモデルを破棄して読み直す */
 function showAvatar(modelUrl: string): Promise<void> {
-  return stage.setCast([{ id: 'avatar', modelUrl, slot: 'center', expression: 'happy', expressionWeight: 1, motionLoop: true }]);
+  return stage.setCast([{ id: 'avatar', modelUrl, slot: 'center', expression: 'neutral', expressionWeight: 1, motionLoop: true }]);
 }
 
 await showAvatar('/models/aoi-school.vrm');
