@@ -4,6 +4,8 @@ VRM をアニメ調に描画するエンジン（Three.js / @pixiv/three-vrm）�
 
 ## 使い方
 
+最小の例は [examples/basic](examples/basic)（`npm run example`。何もない空間にアバターを1人立たせる）。
+
 ```ts
 import { StageManager } from '@anime-vrm/engine/stage/StageManager';
 import { configureAssets } from '@anime-vrm/engine/utils/path';
