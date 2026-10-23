@@ -239,11 +239,13 @@ export interface ShotRig {
 }
 
 /** 構図の既定値（場所で指定がなければこれを使う） */
-export const DEFAULT_SHOT_RIGS: Record<'wide' | 'medium' | 'speaker' | 'close' | 'side' | 'ots', ShotRig> = {
+export const DEFAULT_SHOT_RIGS: Record<'wide' | 'medium' | 'speaker' | 'close' | 'face' | 'side' | 'ots', ShotRig> = {
   wide: { distance: 2.3, height: -0.22, targetHeight: -0.37, lens: 0.8 },
   medium: { distance: 2.2, height: -0.2, targetHeight: -0.3 },
   speaker: { distance: 1.6, height: -0.17, targetHeight: -0.27, lens: 1.25 },
   close: { distance: 1.2, height: -0.09, targetHeight: -0.14, lens: 1.8, orbit: 0.5 },
+  // 顔アップ（肩口から頭まで）。望遠にして顔のパースをゆがませない
+  face: { distance: 0.85, height: -0.01, targetHeight: -0.03, lens: 2.2, orbit: 0.5 },
   // 歩きながらの会話（カメラを話者の左横・少し手前に置き、話者が画面の左から3割ほどに横向きで映る）
   side: { distance: 1.3, height: -0.17, targetHeight: -0.12 },
   // 肩越し（手前の人の肩の後ろから、向かいの人を撮る）。カメラは手前の人に合わせて置き、レンズは画角だけを狭める
@@ -315,6 +317,7 @@ export const LocationStage = group('配置とカメラ', 'Staging & camera', {
     medium: shotRig('会話', 'Two-shot', DEFAULT_SHOT_RIGS.medium).optional(),
     speaker: shotRig('話者', 'Speaker', DEFAULT_SHOT_RIGS.speaker).optional(),
     close: shotRig('アップ', 'Close', DEFAULT_SHOT_RIGS.close).optional(),
+    face: shotRig('顔アップ', 'Face close-up', DEFAULT_SHOT_RIGS.face).optional(),
     side: shotRig('横から', 'From the side', DEFAULT_SHOT_RIGS.side).optional(),
     ots: shotRig('肩越し', 'Over the shoulder', DEFAULT_SHOT_RIGS.ots).optional(),
     /** 注視点（話者の顔あたり）にピントを合わせ、離れた物を距離に応じてぼかす。なければぼかさない */

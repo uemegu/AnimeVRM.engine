@@ -1854,7 +1854,7 @@ export class StageManager {
     const lens = this.shotLens(frame);
     // 被写体の大きさを保ったまま、望遠ほどカメラを離す（画角は shotFov で狭める）
     if (lens !== 1) pose.position.sub(pose.target).multiplyScalar(lens).add(pose.target);
-    const side = frame.shot === 'speaker' || frame.shot === 'close' ? this.lookSide() : 0;
+    const side = frame.shot === 'speaker' || frame.shot === 'close' || frame.shot === 'face' ? this.lookSide() : 0;
     if (side !== 0) {
       const forward = new THREE.Vector3().subVectors(pose.target, pose.position);
       const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
@@ -1874,11 +1874,11 @@ export class StageManager {
 
   /**
    * 構図の画角。基準の画角を、レンズの倍率だけ狭める（広げる）。
-   * 基準は、場所を見せる構図（wide・medium・side）は場所の画角、顔を撮る構図（speaker・close・ots）は
+   * 基準は、場所を見せる構図（wide・medium・side）は場所の画角、顔を撮る構図（speaker・close・face・ots）は
    * 標準の画角にする（広い画角の場所でも、顔の寄り具合とパースがほかの場所と同じになる）
    */
   private shotFov(frame: ReturnType<StageManager['shotFrame']>): number {
-    const face = frame.shot === 'speaker' || frame.shot === 'close' || frame.shot === 'ots';
+    const face = frame.shot === 'speaker' || frame.shot === 'close' || frame.shot === 'face' || frame.shot === 'ots';
     const base = face ? DEFAULT_CAMERA_FOV : (this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV);
     const lens = this.shotLens(frame);
     return lens === 1 ? base : THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(base) / 2) / lens));
@@ -2172,7 +2172,9 @@ export class StageManager {
         if (!avatar?.vrm) continue;
         this.applyCutMotion(id, avatar);
         if (!avatar.vrm.scene.visible) continue;
-        avatar.updateLipSync(id === this.speakerId && !innerVoice ? phoneme : undefined, LIP_SYNC_GAIN * mouthOpen);
+        const speaking = id === this.speakerId && !innerVoice;
+        avatar.updateLipSync(speaking ? phoneme : undefined, LIP_SYNC_GAIN * mouthOpen);
+        avatar.setSpeech(speaking && this.getSpeakerMouthOpen ? mouthOpen : undefined, speaking ? this.cut?.speechTone : undefined);
         const gaze = this.gaze.get(id);
         avatar.setGaze(this.gazeTargetFor(id, gaze?.target), gaze?.headTurn ?? 0.5);
         avatar.setWind(this.raining ? null : this.presets.locations[this.currentLocationId]?.wind);

@@ -17,18 +17,19 @@ export type TextContent = z.infer<typeof TextContent>;
 export const Vec3 = z.tuple([z.number(), z.number(), z.number()]);
 
 /**
- * カメラの構図。close でもバストアップまで（近すぎるとモデルの粗さが目立つ）
+ * カメラの構図。いちばん寄る face でも肩口から頭まで（目元だけのような接写はモデルの粗さが目立つ）
  * - wide: 登場キャラ全員が入る引き
  * - medium: 話者を中心に隣の人物も入る会話ショット
  * - speaker: 話者のウェストアップ（1人の場面の既定）
  * - close: 話者のバストアップ（感情の強調）
+ * - face: 話者の顔アップ（肩口から頭まで。山場で眉・目・首の細かい芝居を見せる）
  * - side: 話者を横から（並んで歩きながらの会話。話者は画面の左寄りに横向きで映る）
  * - ots: 肩越し。手前の人の肩の後ろから、向かいの話者を撮る（向き合って話す・問い詰める）
  *
  * 寄る相手は話者が既定で、ほかの人にもできる（StageManager.setCameraShot の focusId）。
- * close は寄る相手が誰かを見ていれば、顔を斜め前から撮る
+ * close・face は寄る相手が誰かを見ていれば、顔を斜め前から撮る
  */
-export const CameraShot = z.enum(['wide', 'medium', 'speaker', 'close', 'side', 'ots']);
+export const CameraShot = z.enum(['wide', 'medium', 'speaker', 'close', 'face', 'side', 'ots']);
 export type CameraShot = z.infer<typeof CameraShot>;
 
 /**
@@ -43,6 +44,7 @@ export type CameraShift = z.infer<typeof CameraShift>;
  * - pan_left / pan_right: その場で横に振って構図へ着地する（左へ振る / 右へ振る）
  * - tilt_up / tilt_down: その場で縦に振って構図へ着地する（下から上へ / 上から下へ）
  * - dolly_in: 遠くからカメラごと被写体へ近づいて構図へ着地する
+ * - push_in: 一度わずかに引いてから、勢いよく寄って構図へ着地する（溜め 0.12 秒で距離を 12% 引き、寄りながら画角を 2 割狭める。行きすぎは 4% 以内で戻る）
  * - dolly_out: 構図からカメラごと離れていく
  * - zoom_in / zoom_out: 位置はそのまま、構図から画角で寄っていく / 引いていく
  * - orbit_left / orbit_right: 被写体の周りを1周して構図へ戻る（カメラが左へ / 右へ回る。amount が周回数）
@@ -57,6 +59,7 @@ export const CameraMoveType = z.enum([
   'tilt_up',
   'tilt_down',
   'dolly_in',
+  'push_in',
   'dolly_out',
   'zoom_in',
   'zoom_out',
@@ -297,6 +300,13 @@ export interface CutCameraState {
   move?: ResolvedCameraMove;
 }
 
+/**
+ * セリフの話し方の調子。話者の目と首の芝居を変える（calm = ふつう、excited = 勢い、question = 問いかけ、
+ * hesitant = ためらい、surprised = 驚き、shy = 照れ・笑い）
+ */
+export const SpeechTone = z.enum(['calm', 'excited', 'question', 'hesitant', 'surprised', 'shy']);
+export type SpeechTone = z.infer<typeof SpeechTone>;
+
 /** カット内のある時刻の状態 */
 export interface CutState {
   avatars: Record<string, CutAvatarState>;
@@ -315,4 +325,6 @@ export interface CutTimeline {
   cameraShift?: CameraShift;
   /** 心の声か（話者がいても、ボイスで口を動かさない） */
   innerVoice?: boolean;
+  /** セリフの話し方の調子（省略で calm） */
+  speechTone?: SpeechTone;
 }

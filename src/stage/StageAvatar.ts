@@ -18,6 +18,8 @@ import { AvatarEffects } from './AvatarEffects';
 import { idleMotionUrl, resolveAssetUrl } from '../utils/path';
 import { setDaylight } from '../scene/Daylight';
 import { HeldItem } from '../avatar/heldItem';
+import { TalkingFace, type SpeechInput } from '../avatar/talkingFace';
+import type { SpeechTone } from '../schema/stage';
 
 const animationAssetCache = new Map<string, THREE.Group>();
 /** モデルごとに変換したモーション。モデルを捨てたら一緒に消えるよう、モデルをキーにする */
@@ -277,6 +279,10 @@ export class StageAvatar {
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
   private wetDrips: WetDrips | null = null;
+  /** 話している間の首と眉の芝居 */
+  private talkingFace: TalkingFace | null = null;
+  /** 話している声の手がかり（口パクに渡された今の母音・声の大きさ・セリフの調子。話者でなければ母音は undefined） */
+  private speech: SpeechInput = { phoneme: undefined };
   /** 雨で濡れた具合（今の値と、近づけていく値） */
   private wetness = 0;
   private wetnessTarget = 0;
@@ -383,6 +389,7 @@ export class StageAvatar {
           this.clothDent = ClothDent.create(vrm, this.clothDentEnabled);
           this.springWind = SpringWind.create(vrm);
           this.wetDrips = WetDrips.create(vrm, this.scene);
+          this.talkingFace = TalkingFace.create(vrm);
 
           // 1. スムース法線の事前計算（綺麗なアニメアウトライン用）
           applySmoothNormalsToHierarchy(vrm.scene);
@@ -694,6 +701,7 @@ export class StageAvatar {
   ): void {
     if (!this.vrm?.expressionManager) return;
     const manager = this.vrm.expressionManager;
+    this.speech.phoneme = phoneme;
 
     const phonemes = ['aa', 'ee', 'ih', 'oh', 'ou'] as const;
     const target: Record<string, number> = {
@@ -732,6 +740,12 @@ export class StageAvatar {
     }
   }
 
+  /** 話している声の大きさ（録音の 0〜1。分からなければ undefined）とセリフの調子。話者でなければ両方 undefined */
+  public setSpeech(loudness: number | undefined, tone: SpeechTone | undefined): void {
+    this.speech.loudness = loudness;
+    this.speech.tone = tone;
+  }
+
   public resetLipSync(): void {
     if (!this.vrm?.expressionManager) return;
     const manager = this.vrm.expressionManager;
@@ -740,6 +754,7 @@ export class StageAvatar {
       this.phonemeWeights[p] = 0;
       manager.setValue(p, 0);
     });
+    this.speech = { phoneme: undefined };
     this.isLipSyncActive = false;
   }
 
@@ -762,6 +777,13 @@ export class StageAvatar {
 
     // 1.5 顔を視線の先へ向ける（モーションの姿勢に足す）
     this.updateHeadTurn(delta);
+
+    // 1.55 話している間は首を動かし、眉を上げる
+    if (this.talkingFace) {
+      const emotion = Math.max(0, ...this.emotionWeights.values());
+      const blink = this.vrm.expressionManager?.getValue('blink') ?? 0;
+      this.appliedTurn.push(...this.talkingFace.update(delta, this.speech, emotion, blink));
+    }
 
     // 1.6 手が肌（頭・太もも）に入っていたら外へ出す（頭の向きが決まってから）
     this.handClearance?.apply();

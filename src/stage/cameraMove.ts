@@ -15,6 +15,13 @@ const DOLLY_IN_BACK = 1.2;
 const DOLLY_OUT_BACK = 2;
 const DOLLY_ZOOM_BACK = 2;
 const CRANE_BACK = 0.8;
+/** プッシュイン：amount 1 で構図の2倍の距離から寄る。寄る前の溜め（秒）と引く割合、寄り始めに広げておく画角の割合 */
+const PUSH_BACK = 1;
+const PUSH_WIND_UP_SEC = 0.12;
+const PUSH_WIND_UP = 0.12;
+const PUSH_WIDEN = 0.25;
+/** 行きすぎて戻る大きさ（easeOutBack の係数。1 で寄る距離の約 4%） */
+const PUSH_OVERSHOOT = 1;
 /** 昇る高さ（m） */
 const CRANE_RAISE = 2.5;
 /** ズームインで寄る倍率（1 で画面の幅が半分）・ズームアウトで広げる倍率 */
@@ -25,6 +32,12 @@ const HANDHELD_DEG = 0.8;
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+/** 目標を少し越えてから戻る（越える量は c で決まる） */
+function easeOutBack(t: number, c: number): number {
+  const u = t - 1;
+  return 1 + (c + 1) * u * u * u + c * u * u;
 }
 
 /**
@@ -72,6 +85,25 @@ export function applyCameraMove(
     case 'dolly_in':
       back = DOLLY_IN_BACK * landing;
       break;
+    case 'push_in': {
+      // 溜め：構図の (1 + PUSH_BACK) 倍の距離からさらに少し引く。寄り：行きすぎて戻りながら構図へ着地し、画角も狭める
+      const t = time - move.at;
+      const windUp = Math.min(PUSH_WIND_UP_SEC, move.duration * 0.3);
+      const start = 1 + PUSH_BACK * move.amount;
+      const pulled = start * (1 + PUSH_WIND_UP);
+      let scale: number;
+      if (t < windUp) {
+        const w = THREE.MathUtils.clamp(t / windUp, 0, 1);
+        scale = start + (pulled - start) * (1 - (1 - w) * (1 - w));
+        widen = PUSH_WIDEN;
+      } else {
+        const u = THREE.MathUtils.clamp((t - windUp) / Math.max(move.duration - windUp, 1e-3), 0, 1);
+        scale = pulled + (1 - pulled) * easeOutBack(u, PUSH_OVERSHOOT);
+        widen = PUSH_WIDEN * (1 - easeInOutCubic(u));
+      }
+      back = scale - 1;
+      break;
+    }
     case 'dolly_out':
       back = DOLLY_OUT_BACK * leaving;
       break;
