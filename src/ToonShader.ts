@@ -311,6 +311,7 @@ export function applyToonShader(
       const material = sourceMaterial as MToonLikeMaterial;
       if (!material.isMToonMaterial) return;
       originalBaseColors.set(material, (material.color ?? material.uniforms?.litFactor?.value ?? new THREE.Color(1, 1, 1)).clone());
+      keepBakedShading(material);
       if (isEyeMaterial(material.name || '') || isFaceFeatureMaterial(material.name || '')) {
         originalFeatureStates.set(material, {
           shadeColor: (material.shadeColorFactor ?? material.uniforms?.shadeColorFactor?.value)?.clone(),
@@ -327,8 +328,11 @@ export function applyToonShader(
       const hairShadowReceiver = {
         value: !material.isOutline && (kind === 'face' || kind === 'eye' || kind === 'body') ? 1 : 0,
       };
-      // 天使の輪・頭頂のなめらかな陰影を描くのは髪（アウトラインを除く）
-      const hairRingTarget = { value: !material.isOutline && kind === 'hair' ? 1 : 0 };
+      // 天使の輪・頭頂のなめらかな陰影を描くのは髪（アウトラインを除く）。
+      // テクスチャにハイライトが描いてある髪は、glTF のマテリアルの extras に hairRing: false を書くと輪だけ描かない
+      // （頭頂のなめらかな陰影は残す。消すと後頭部が影の境目でパキッと暗くなる）
+      const hairCrownTarget = { value: !material.isOutline && kind === 'hair' ? 1 : 0 };
+      const hairRingTarget = { value: hairCrownTarget.value > 0 && material.userData?.hairRing !== false ? 1 : 0 };
       // 顔の陰影を SDF マップで決めるのは顔の肌・口まわり（アウトラインを除く）。マップは走査後にまとめて作る
       const faceSdfTarget = { value: 0 };
       if (!material.isOutline && kind === 'face') {
@@ -528,7 +532,7 @@ export function applyToonShader(
 
         injectHairShadow(shader, hairShadowUniforms, hairShadowReceiver);
         injectHairRing(shader, hairRingTarget, hairRingHeadFrame);
-        injectHairCrown(shader, hairRingTarget, hairRingHeadFrame);
+        injectHairCrown(shader, hairCrownTarget, hairRingHeadFrame);
         injectFaceSdf(shader, faceSdfTarget, faceSdfFrame);
         injectWetCloth(shader, wetClothTarget, wetClothFrame, wetMap);
 
@@ -699,6 +703,20 @@ export function applyToonShader(
     });
   };
 
+  // テクスチャに陰影が描いてある（glTF のマテリアルの extras に bakedShading: true）マテリアルは、
+  // ライトの影を付けない（影色を明るい側と同じにする）。影を重ねると、描いた陰影と影の境目が二重になる
+  function keepBakedShading(material: MToonLikeMaterial): void {
+    if (material.userData?.bakedShading !== true) return;
+    const lit = material.color ?? material.uniforms?.litFactor?.value;
+    if (!lit) return;
+    if (material.shadeColorFactor) material.shadeColorFactor.copy(lit);
+    if (material.uniforms?.shadeColorFactor?.value) material.uniforms.shadeColorFactor.value.copy(lit);
+    if (!material.shadeMultiplyTexture && material.map) {
+      material.shadeMultiplyTexture = material.map;
+      material.needsUpdate = true;
+    }
+  }
+
   // Apply material params directly to MToon parameters
   const applyMaterialStyle = (kind: 'body' | 'hair' | 'cloth', params: Partial<MaterialStyleParams>) => {
 
@@ -784,6 +802,8 @@ export function applyToonShader(
           material.shadingShiftFactor = shift;
           if (material.uniforms?.shadingShiftFactor) material.uniforms.shadingShiftFactor.value = shift;
         }
+
+        keepBakedShading(material);
 
         const lift = material.userData.darkLitLift as { value: number } | undefined;
         if (lift) lift.value = params.darkLitLift ?? 0;
