@@ -285,9 +285,9 @@ export class ClothDent {
     if (capsules.length === 0 || palms.length < 2) return null;
 
     const dent = new ClothDent(vrm, meshes[0], capsules, palms, measureFloor(vrm, skin), enabled);
-    for (const mesh of meshes) {
-      for (const material of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) dent.patch(material);
-    }
+    // 前後のスカートなどが同じ材質を共有していても、書き足すのは1回だけ（2回だと宣言が重なって描けなくなる）
+    const materials = new Set(meshes.flatMap((mesh) => (Array.isArray(mesh.material) ? mesh.material : [mesh.material])));
+    for (const material of materials) dent.patch(material);
     return dent;
   }
 
