@@ -92,13 +92,35 @@ export const CameraMove = z.union([
 ]);
 export type CameraMove = z.infer<typeof CameraMove>;
 
+/**
+ * キーでカメラを動かすときの速さの変わり方（in_out = ゆっくり始まりゆっくり止まる（既定）、
+ * linear = 一定の速さ（歩く人を追う）、in = だんだん速く（勢いよく突っ込む））
+ */
+export const CameraEase = z.enum(['in_out', 'linear', 'in']);
+export type CameraEase = z.infer<typeof CameraEase>;
+
 /** カメラの位置・注視点・画角を直接指定する（構図の自動決定より優先） */
 export const CameraPose = z.strictObject({
   position: Vec3,
   target: Vec3,
-  fov: z.number().min(10).max(90).optional(),
+  /** 画角（度）。遠くから望遠で寄る（歩いてくる人の顔を大きさを変えずに撮る）ときは数度まで狭められる */
+  fov: z.number().min(2).max(90).optional(),
 });
 export type CameraPose = z.infer<typeof CameraPose>;
+
+/**
+ * 光線（魔法）。from から to へ一気に伸び、duration 秒撃ち続けて消える
+ * - color: 外側の光の色（芯は白。既定 #8fd3ff）
+ * - width: 太さ（メートル。既定 0.12）
+ */
+export const BeamConfig = z.strictObject({
+  from: Vec3,
+  to: Vec3,
+  duration: z.number().positive().optional(),
+  color: z.string().optional(),
+  width: z.number().positive().optional(),
+});
+export type BeamConfig = z.infer<typeof BeamConfig>;
 
 /** 漫画風の文字演出のプリセット */
 export const EffectTextPreset = z.enum(['doki', 'kirakira', 'yatta', 'iraira', 'gaan', 'wanawana', 'shiin', 'biku', 'nima', 'asease']);
@@ -269,9 +291,11 @@ export interface CutAvatarState {
   tears?: boolean;
   eyeWander?: number;
   motionSpeed?: number;
-  /** 移動（at から duration 秒で to へ）と退場（at から duration 秒で透明になる） */
+  /** 移動（at から duration 秒で to へ）と退場（at から duration 秒で透明になる・霧になる） */
   move?: { at: number; to: [number, number, number]; duration: number };
   fadeOut?: { at: number; duration: number };
+  /** 霧になって消える（at から duration 秒で粒になり、to へ流れていく。to がなければ舞い上がる） */
+  mistOut?: { at: number; duration: number; to?: [number, number, number] };
 }
 
 /** 秒数・大きさを埋めたカメラの動きと、動き始める時刻 */
@@ -293,9 +317,10 @@ export interface CutCameraState {
   /** 構図を切り替えたキーのずらし（省略で真ん中） */
   shift?: CameraShift;
   pose?: CameraPose;
-  /** 切り替えた時刻と、動かすのにかける秒数 */
+  /** 切り替えた時刻と、動かすのにかける秒数・速さの変わり方 */
   at?: number;
   duration?: number;
+  ease?: CameraEase;
   /** 今のカメラの動き（カットの指定、またはキーで始めた動き） */
   move?: ResolvedCameraMove;
 }
@@ -314,6 +339,8 @@ export interface CutState {
   focusLines: boolean;
   /** 時刻 t までに出す1回きりの演出（カットの指定は at 0） */
   oneShots: AvatarOneShot[];
+  /** 時刻 t までに撃った光線（撃った時刻つき） */
+  beams?: (Required<Pick<BeamConfig, 'from' | 'to'>> & { at: number; duration: number; color: string; width: number })[];
 }
 
 /** カット1つ分（StageManager.setCutTimeline に渡す形）。stateAt はカット内の時刻 t の状態を返す */

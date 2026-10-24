@@ -34,10 +34,12 @@ import { CharacterMaskRenderer, DEFAULT_LIGHT_WRAP_PARAMS, EYE_LAYER, LightWrapS
 import { ParaShader, DEFAULT_PARA_PARAMS, applyParaParams } from '../postprocessing/Para';
 import { setHairRingTint } from '../shader/HairRing';
 import { resolveBloomConfig, resolveLocationVisuals, DEFAULT_BACKDROP, DEFAULT_CAMERA_FOV, DEFAULT_DEPTH_OF_FIELD, DEFAULT_SHOT_RIGS, DEFAULT_SLOT_POSITIONS, type LocationStage, type ShotRig } from '../schema/visual';
-import { DEFAULT_AVATAR_LOOK, type CameraPose as CameraPoseSetting, type CameraShift, type CameraShot, type AvatarOneShot, type CutAvatarState, type CutState, type CutTimeline, type ResolvedCameraMove, type SceneEffects, type TextContent } from '../schema/stage';
+import { DEFAULT_AVATAR_LOOK, type CameraPose as CameraPoseSetting, type CameraShift, type CameraShot, type AvatarOneShot, type CameraEase, type CutAvatarState, type CutState, type CutTimeline, type ResolvedCameraMove, type SceneEffects, type TextContent } from '../schema/stage';
 import type { StageCastMember } from './types';
 import { StageSpriteActor } from './StageSprite';
 import { applyCameraMove } from './cameraMove';
+import { MistDissolve } from '../effects/mist/MistDissolve';
+import { LightBeam } from '../effects/beam/LightBeam';
 import { FrameRateCheck, resolveStageQuality, stageQualityOf, type StageQuality, type StageQualityLevel } from './quality';
 
 /** これより短いモーションは止め絵のポーズとして扱う（待機に戻さず保つ） */
@@ -75,6 +77,12 @@ interface CameraPose {
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function cameraEase(ease: CameraEase | undefined, t: number): number {
+  if (ease === 'linear') return t;
+  if (ease === 'in') return t * t * t;
+  return easeInOutCubic(t);
 }
 
 export interface StagePresets {
@@ -233,7 +241,7 @@ export class StageManager {
   /** 構図からのずらし（setCameraShift で選んだもの。カット・キーの指定が優先） */
   private cameraShift: CameraShift | null = null;
   private timelineShift: CameraShift | null = null;
-  private timelinePose: { pose: CameraPoseSetting; duration?: number } | null = null;
+  private timelinePose: { pose: CameraPoseSetting; duration?: number; ease?: CameraEase } | null = null;
   /** キーで替えた寄る相手と、肩越しの手前の人（カットの指定より優先） */
   private timelineFocus: string | null = null;
   private timelineOver: string | null = null;
@@ -270,7 +278,12 @@ export class StageManager {
   /** キャラごとに最後に当てた状態（差分だけ当てるため） */
   private appliedCut = new Map<string, string>();
   /** カットのタイムラインが指定した移動・退場（キャラ ID → 状態）。毎フレーム位置・透明度に反映する */
-  private cutMotion = new Map<string, Pick<CutAvatarState, 'move' | 'fadeOut'>>();
+  private cutMotion = new Map<string, Pick<CutAvatarState, 'move' | 'fadeOut' | 'mistOut'>>();
+  /** 霧になって消えている最中のキャラ（キーの時刻で見分ける。写し取る前は effect が null） */
+  private mists = new Map<string, { key: string; effect: MistDissolve | null }>();
+  /** カットで撃った光線（指定の JSON で見分ける） */
+  private cutBeams: NonNullable<CutState['beams']> = [];
+  private beams = new Map<string, LightBeam>();
   /** 移動中だったキャラ（移動が終わったら立ち位置へ戻す） */
   private movedIds = new Set<string>();
   /** 退場で透明になって隠したキャラ */
@@ -1288,7 +1301,7 @@ export class StageManager {
     const member = this.castMembers.find((m) => m.id === id);
     const root = avatar.vrm?.scene;
     if (!member || !root) return;
-    const { move, fadeOut } = this.cutMotion.get(id) ?? {};
+    const { move, fadeOut, mistOut } = this.cutMotion.get(id) ?? {};
     const base = this.resolvePosition(member);
     if (move) {
       const t = THREE.MathUtils.clamp((this.cutTime - move.at) / move.duration, 0, 1);
@@ -1304,12 +1317,68 @@ export class StageManager {
     }
     const fade = fadeOut ? THREE.MathUtils.clamp((this.cutTime - fadeOut.at) / fadeOut.duration, 0, 1) : 0;
     avatar.setOpacity(1 - fade);
-    if (fade >= 1) {
+    // 霧：始まったら写し取るまでは見せておき、写したら粒に任せて隠す
+    const mist = mistOut && this.cutTime > mistOut.at ? Math.min(1, (this.cutTime - mistOut.at) / mistOut.duration) : 0;
+    const mistKey = mistOut ? JSON.stringify(mistOut) : '';
+    let mistState = this.mists.get(id);
+    if (mistState && (mist <= 0 || mistState.key !== mistKey)) {
+      mistState.effect?.dispose();
+      this.mists.delete(id);
+      mistState = undefined;
+    }
+    if (mist > 0 && !mistState) this.mists.set(id, (mistState = { key: mistKey, effect: null }));
+    if (fade >= 1 || mist >= 1 || mistState?.effect) {
       root.visible = false;
       this.fadedIds.add(id);
     } else if (this.fadedIds.delete(id)) {
       root.visible = true;
     }
+  }
+
+  /** カットで撃った光線を出し、撃ってからの秒数で伸び・消えを当てる。カットから外れたものは片付ける */
+  private updateBeams(): void {
+    const keys = new Set<string>();
+    for (const beam of this.cutBeams) {
+      const key = JSON.stringify(beam);
+      keys.add(key);
+      let effect = this.beams.get(key);
+      if (!effect) {
+        effect = new LightBeam(this.scene, beam);
+        this.beams.set(key, effect);
+      }
+      effect.update(this.cutTime - beam.at, this.camera);
+    }
+    this.beams.forEach((effect, key) => {
+      if (keys.has(key)) return;
+      effect.dispose();
+      this.beams.delete(key);
+    });
+  }
+
+  /** 霧になって消えるキャラを、始まった最初のフレームで写し取り、粒の進みを当てる */
+  private updateMists(): void {
+    if (!this.mists.size) return;
+    const height = this.renderer.getDrawingBufferSize(new THREE.Vector2()).y;
+    this.mists.forEach((state, id) => {
+      const mistOut = this.cutMotion.get(id)?.mistOut;
+      const root = this.loadedAvatars.get(id)?.vrm?.scene;
+      if (!mistOut || !root || !this.castIds.includes(id)) {
+        state.effect?.dispose();
+        this.mists.delete(id);
+        return;
+      }
+      const progress = THREE.MathUtils.clamp((this.cutTime - mistOut.at) / mistOut.duration, 0, 1);
+      if (!state.effect && progress < 1) {
+        const avatar = this.loadedAvatars.get(id)!;
+        const chest = root.position.clone();
+        chest.y += this.getHeadHeight(avatar) * 0.7;
+        root.updateMatrixWorld(true);
+        const to = mistOut.to ? new THREE.Vector3(...mistOut.to).setY(mistOut.to[1] + this.getHeadHeight(avatar) * 0.7) : null;
+        state.effect = MistDissolve.capture(this.renderer, this.scene, this.camera, root, chest, to);
+        if (state.effect) root.visible = false;
+      }
+      state.effect?.update(progress, this.camera, height);
+    });
   }
 
   /** 2D のデフォルメ画像を立てる（指定にないものは隠す） */
@@ -1586,7 +1655,7 @@ export class StageManager {
       const avatar = this.loadedAvatars.get(member.id);
       if (!avatar?.vrm || !this.castIds.includes(member.id)) continue;
       const key = state.avatars[member.id] ?? {};
-      this.cutMotion.set(member.id, { move: key.move, fadeOut: key.fadeOut });
+      this.cutMotion.set(member.id, { move: key.move, fadeOut: key.fadeOut, mistOut: key.mistOut });
       const look = member.look ?? DEFAULT_AVATAR_LOOK;
       const effective = {
         expression: key.expression ?? member.expression,
@@ -1647,6 +1716,7 @@ export class StageManager {
 
     this.screenEffects?.setFocusLines(state.focusLines);
     this.fireOneShots(state.oneShots, seek);
+    this.cutBeams = state.beams ?? [];
 
     const camera = state.camera;
     const cameraJson = JSON.stringify(camera);
@@ -1656,7 +1726,7 @@ export class StageManager {
       this.timelineShift = camera.shift ?? null;
       this.timelineFocus = camera.focus ?? null;
       this.timelineOver = camera.over ?? null;
-      this.timelinePose = camera.pose ? { pose: camera.pose, duration: seek ? 0 : camera.duration } : null;
+      this.timelinePose = camera.pose ? { pose: camera.pose, duration: seek ? 0 : camera.duration, ease: camera.ease } : null;
       this.timelineShotDuration = seek ? undefined : camera.duration;
       // 続ける動きは、前のカットの動きと進んだ秒数を引き継ぐ
       const carried = camera.move?.continue && this.carriedMove?.move.type === camera.move.type ? this.carriedMove : null;
@@ -2010,8 +2080,8 @@ export class StageManager {
     this.cameraFraming = framing;
     const settling = this.clock.elapsedTime - this.cutStartedAt < CUT_SETTLE_SEC;
     const requested = this.timelinePose ? this.timelinePose.duration : this.timelineShot ? this.timelineShotDuration : undefined;
-    this.cameraTransitionSec = reframed || settling ? (requested ?? 0) : CAMERA_TRANSITION_SEC;
 
+    // 目標が変わらなければ補間はそのまま（キーで動きだけ足したときに秒数を変えると、補間が頭からやり直しになり前のカットの位置へ戻って見える）
     if (
       this.hasCameraPose &&
       pose.position.distanceTo(this.cameraTo.position) < 1e-4 &&
@@ -2019,6 +2089,7 @@ export class StageManager {
     ) {
       return;
     }
+    this.cameraTransitionSec = reframed || settling ? (requested ?? 0) : CAMERA_TRANSITION_SEC;
 
     this.cameraFrom = { position: this.camera.position.clone(), target: this.cameraCurrentTarget.clone() };
     this.cameraTo = pose;
@@ -2035,7 +2106,7 @@ export class StageManager {
   private updateCamera(delta: number): void {
     const duration = this.cameraTransitionSec;
     this.cameraElapsed = Math.min(duration, this.cameraElapsed + delta);
-    const t = duration > 0 ? easeInOutCubic(this.cameraElapsed / duration) : 1;
+    const t = duration > 0 ? cameraEase(this.timelinePose?.ease, this.cameraElapsed / duration) : 1;
     this.cameraBasePosition.lerpVectors(this.cameraFrom.position, this.cameraTo.position, t);
     this.cameraCurrentTarget.lerpVectors(this.cameraFrom.target, this.cameraTo.target, t);
     const move = this.cameraMove ?? this.previewMove;
@@ -2218,6 +2289,9 @@ export class StageManager {
         const root = this.loadedAvatars.get(id)?.vrm?.scene;
         return root?.visible ? [root.position] : [];
       }));
+
+      this.updateMists();
+      this.updateBeams();
 
       // 6. 前髪の影用に髪の深度を描く
       this.hairShadow.render(this.renderer, this.scene, this.camera, this.directionalLight);
