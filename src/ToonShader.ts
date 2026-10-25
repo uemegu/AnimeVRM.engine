@@ -312,6 +312,12 @@ export function applyToonShader(
       if (!material.isMToonMaterial) return;
       originalBaseColors.set(material, (material.color ?? material.uniforms?.litFactor?.value ?? new THREE.Color(1, 1, 1)).clone());
       keepBakedShading(material);
+      // MToon は既定で頂点カラーを無視する。extras.useVertexColor: true のマテリアルだけ明るい側・影色の両方に掛ける
+      // （髪の内側を暗くするなど、頂点ごとの濃さを焼き込んだメッシュ向け）
+      if (material.userData?.useVertexColor === true && 'ignoreVertexColor' in material) {
+        (material as unknown as { ignoreVertexColor: boolean }).ignoreVertexColor = false;
+        material.needsUpdate = true;
+      }
       if (isEyeMaterial(material.name || '') || isFaceFeatureMaterial(material.name || '')) {
         originalFeatureStates.set(material, {
           shadeColor: (material.shadeColorFactor ?? material.uniforms?.shadeColorFactor?.value)?.clone(),
@@ -332,7 +338,10 @@ export function applyToonShader(
       // テクスチャにハイライトが描いてある髪は、glTF のマテリアルの extras に hairRing: false を書くと輪だけ描かない
       // （頭頂のなめらかな陰影は残す。消すと後頭部が影の境目でパキッと暗くなる）
       const hairCrownTarget = { value: !material.isOutline && kind === 'hair' ? 1 : 0 };
-      const hairRingTarget = { value: hairCrownTarget.value > 0 && material.userData?.hairRing !== false ? 1 : 0 };
+      // 暗い髪で輪が白く浮くときは、マテリアルの extras.hairRingStrength（0〜1）で濃さを調整する。
+      const ringStrength = typeof material.userData?.hairRingStrength === 'number'
+        ? THREE.MathUtils.clamp(material.userData.hairRingStrength, 0, 1) : 1;
+      const hairRingTarget = { value: hairCrownTarget.value > 0 && material.userData?.hairRing !== false ? ringStrength : 0 };
       // 顔の陰影を SDF マップで決めるのは顔の肌・口まわり（アウトラインを除く）。マップは走査後にまとめて作る
       const faceSdfTarget = { value: 0 };
       if (!material.isOutline && kind === 'face') {
@@ -439,6 +448,10 @@ export function applyToonShader(
         if (prevOnBeforeCompile) {
           prevOnBeforeCompile(shader, renderer);
         }
+        // three の vColor は vec4。MToon のシェーダーは vec3 として掛けているのでコンパイルできない（useVertexColor のとき）
+        shader.fragmentShader = shader.fragmentShader
+          .replace('diffuseColor.rgb *= vColor;', 'diffuseColor.rgb *= vColor.rgb;')
+          .replace('material.shadeColor.rgb *= vColor;', 'material.shadeColor.rgb *= vColor.rgb;');
 
         shader.uniforms.uBottomGradientEnabled = bottomGradientUniforms.uBottomGradientEnabled;
         shader.uniforms.uBottomGradientStartY = bottomGradientUniforms.uBottomGradientStartY;
@@ -533,6 +546,10 @@ export function applyToonShader(
         injectHairShadow(shader, hairShadowUniforms, hairShadowReceiver);
         injectHairRing(shader, hairRingTarget, hairRingHeadFrame);
         injectHairCrown(shader, hairCrownTarget, hairRingHeadFrame);
+        // 長い一枚の毛束では、影のばらつきを小さくして段状の境界を避けられる。
+        if (typeof material.userData?.hairCrownJitter === 'number') {
+          shader.uniforms.uHairCrownJitter = { value: THREE.MathUtils.clamp(material.userData.hairCrownJitter, 0, 0.1) };
+        }
         injectFaceSdf(shader, faceSdfTarget, faceSdfFrame);
         injectWetCloth(shader, wetClothTarget, wetClothFrame, wetMap);
 
@@ -773,6 +790,10 @@ export function applyToonShader(
         if (params.shadeMultiply) {
           // 基本色係数（litFactor）も掛ける。白テクスチャ × 黒係数で色を出しているマテリアルでも影色が合う
           const shadeColor = new THREE.Color(params.shadeMultiply).multiply(originalBaseColors.get(material) ?? new THREE.Color(1, 1, 1));
+          // 髪ごとの影の濃さ。時間帯の色を保ったまま、暗い髪の黒つぶれを抑える。
+          if (matKind === 'hair' && typeof material.userData?.hairShadeStrength === 'number') {
+            shadeColor.lerp(originalBaseColors.get(material) ?? new THREE.Color(1, 1, 1), 1 - THREE.MathUtils.clamp(material.userData.hairShadeStrength, 0, 1));
+          }
           if (material.shadeColorFactor) material.shadeColorFactor.copy(shadeColor);
           if (material.uniforms?.shadeColorFactor?.value) material.uniforms.shadeColorFactor.value.copy(shadeColor);
         }
@@ -788,8 +809,10 @@ export function applyToonShader(
 
         // Shading Toony Factor
         if (typeof params.shadingToonyFactor === 'number') {
-          material.shadingToonyFactor = params.shadingToonyFactor;
-          if (material.uniforms?.shadingToonyFactor) material.uniforms.shadingToonyFactor.value = params.shadingToonyFactor;
+          const toony = matKind === 'hair' && typeof material.userData?.hairMaxToony === 'number'
+            ? Math.min(params.shadingToonyFactor, THREE.MathUtils.clamp(material.userData.hairMaxToony, 0, 1)) : params.shadingToonyFactor;
+          material.shadingToonyFactor = toony;
+          if (material.uniforms?.shadingToonyFactor) material.uniforms.shadingToonyFactor.value = toony;
         }
 
         // Shading Shift Factor

@@ -197,7 +197,7 @@ export function injectHairRing(
     }
 
     vec3 applyHairRing(vec3 col, vec3 viewNormal) {
-      if (uHairRingEnabled < 0.5 || uHairRingTarget < 0.5) return col;
+      if (uHairRingEnabled < 0.5 || uHairRingTarget <= 0.0) return col;
 
       // 頭の座標系（ビュー空間）
       vec3 upV = normalize((viewMatrix * vec4(uHairRingHeadUp, 0.0)).xyz);
@@ -241,7 +241,7 @@ export function injectHairRing(
       float gap = step(hairRingHash(gapSeg + 31.7), uHairRingGapRate);
 
       float lit = smoothstep(0.2, 0.6, hairRingShading);
-      float ring = band * fade * lit * (1.0 - gap) * uHairRingStrength;
+      float ring = band * fade * lit * (1.0 - gap) * uHairRingStrength * uHairRingTarget;
 
       vec3 ringCol = mix(col, uHairRingTint, uHairRingLighten);
       float luma = dot(ringCol, vec3(0.2126, 0.7152, 0.0722));
