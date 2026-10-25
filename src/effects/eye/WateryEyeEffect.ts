@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { VRM } from '@pixiv/three-vrm';
+import { EYES_CLOSED_EXPRESSIONS } from '../../avatar/shapeKeyExpressions';
 
 export interface WateryEyeConfig {
   enabled: boolean;
   intensity: number;          // 全体強度 (0.0 ~ 2.0)
   waveSpeed: number;          // 水膜のゆらめき速度
   waveScale: number;          // 水面波紋の細かさ
+  filmIntensity: number;      // 瞳全体にかかる水膜の強度（強いと瞳の色が水色に抜ける）
   meniscusIntensity: number;  // 下まぶたの涙だまり強度
   sparkleIntensity: number;   // きらめき光粒の強度
   waterColor: string;         // 水膜・潤みカラー (薄いアクアブルー)
@@ -20,6 +22,7 @@ export const DEFAULT_WATERY_EYE_CONFIG: WateryEyeConfig = {
   intensity: 1.0,
   waveSpeed: 2.8,
   waveScale: 14.0,
+  filmIntensity: 1.0,
   meniscusIntensity: 1.2,
   sparkleIntensity: 1.1,
   waterColor: '#c2f0ff',
@@ -96,6 +99,7 @@ export class WateryEyeEffect {
       uniform float uBlinkWeight;
       uniform float uWaveSpeed;
       uniform float uWaveScale;
+      uniform float uFilmIntensity;
       uniform float uMeniscusIntensity;
       uniform float uSparkleIntensity;
       uniform vec3 uWaterColor;
@@ -183,13 +187,13 @@ export class WateryEyeEffect {
         // 4. カラーとアルファの合成
         // 水膜カラー: 淡い透明アクアブルー
         // 光彩・スパークル: クリアなホワイト
-        vec3 waterCol = uWaterColor * (moistGlow + caustics * 0.55);
+        vec3 waterCol = uWaterColor * (moistGlow + caustics * 0.55) * uFilmIntensity;
         vec3 highlightCol = uSparkleColor * (meniscus * 1.2 + sparkles * 1.4);
         vec3 finalCol = waterCol + highlightCol;
 
         // まばたき(まぶた閉)時はアルファをゼロにし、まぶたの突き抜けを防止
         float blinkFade = 1.0 - smoothstep(0.15, 0.75, uBlinkWeight);
-        float alpha = (moistGlow * 0.5 + caustics * 0.45 + meniscus * 0.85 + sparkles * 0.95);
+        float alpha = ((moistGlow * 0.5 + caustics * 0.45) * uFilmIntensity + meniscus * 0.85 + sparkles * 0.95);
         alpha *= eyeMask * uIntensity * blinkFade;
 
         gl_FragColor = vec4(finalCol, clamp(alpha, 0.0, 0.95));
@@ -210,6 +214,7 @@ export class WateryEyeEffect {
         uBlinkWeight: { value: 0.0 },
         uWaveSpeed: { value: this.config.waveSpeed },
         uWaveScale: { value: this.config.waveScale },
+        uFilmIntensity: { value: this.config.filmIntensity },
         uMeniscusIntensity: { value: this.config.meniscusIntensity },
         uSparkleIntensity: { value: this.config.sparkleIntensity },
         uWaterColor: { value: new THREE.Color(this.config.waterColor) },
@@ -232,6 +237,8 @@ export class WateryEyeEffect {
     }
 
     if (!this.material) return;
+
+    if (this.leftEyeBone && this.rightEyeBone && this.attachToIrises(this.leftEyeBone, this.rightEyeBone)) return;
 
     const r = this.config.eyeRadius;
     const geo = new THREE.PlaneGeometry(r * 2.0, r * 2.2);
@@ -268,6 +275,59 @@ export class WateryEyeEffect {
     }
   }
 
+  /**
+   * 瞳（EyeIris）の頂点から左右の瞳の中心・大きさ・表面を求め、その少し手前に板を置いて目のボーンに付ける。
+   * 目のボーンは瞳の表面より数 cm 奥にあるため、ボーンからの固定オフセットでは板が頭の中に埋もれる。
+   * 素の姿勢のうちに呼ぶ（モーションを流す前）。瞳が見つからなければ false
+   */
+  private attachToIrises(leftEyeBone: THREE.Object3D, rightEyeBone: THREE.Object3D): boolean {
+    const root = this.vrm.scene;
+    root.updateMatrixWorld(true);
+    const toRoot = root.matrixWorld.clone().invert();
+    const sides = [new THREE.Box3(), new THREE.Box3()]; // x < 0, x >= 0（root の座標）
+    const v = new THREE.Vector3();
+    root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      if (!materials.some((m) => /EyeIris/i.test(m.name))) return;
+      // VRoid の顔は材質ごとの部品が頂点を共有するので、瞳の面が使う頂点だけを見る
+      const position = mesh.geometry.getAttribute('position');
+      const index = mesh.geometry.getIndex();
+      const toRootFromMesh = toRoot.clone().multiply(mesh.matrixWorld);
+      const count = index ? index.count : position.count;
+      for (let i = 0; i < count; i++) {
+        v.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(toRootFromMesh);
+        sides[v.x < 0 ? 0 : 1].expandByPoint(v);
+      }
+    });
+    if (sides.some((box) => box.isEmpty())) return false;
+
+    const boneX = (bone: THREE.Object3D) => bone.getWorldPosition(new THREE.Vector3()).applyMatrix4(toRoot);
+    const leftPos = boneX(leftEyeBone);
+    const facing = Math.sign(sides[0].getCenter(v).z - leftPos.z) || 1; // 瞳はボーンより前にある
+    const rootQuat = root.getWorldQuaternion(new THREE.Quaternion());
+    if (facing < 0) rootQuat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI));
+
+    const place = (bone: THREE.Object3D, box: THREE.Box3): THREE.Mesh => {
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const front = facing > 0 ? box.max.z : box.min.z;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(size.x * 1.1, size.y * 1.1), this.material!);
+      mesh.renderOrder = 200;
+      bone.add(mesh);
+      mesh.position.copy(bone.worldToLocal(new THREE.Vector3(center.x, center.y, front + facing * 0.002).applyMatrix4(root.matrixWorld)));
+      mesh.quaternion.copy(bone.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(rootQuat));
+      return mesh;
+    };
+    const leftOnNegative = leftPos.x < 0;
+    this.leftEyeMesh = place(leftEyeBone, sides[leftOnNegative ? 0 : 1]);
+    this.rightEyeMesh = place(rightEyeBone, sides[leftOnNegative ? 1 : 0]);
+    this.leftEyeMesh.name = 'WateryEyeMesh_Left';
+    this.rightEyeMesh.name = 'WateryEyeMesh_Right';
+    return true;
+  }
+
   public update(delta: number, elapsed: number, blinkWeight: number = 0.0): void {
     this.elapsedTime = elapsed;
 
@@ -283,14 +343,14 @@ export class WateryEyeEffect {
 
     this.material.uniforms.uTime.value = this.elapsedTime;
     this.material.uniforms.uIntensity.value = this.currentIntensity;
-    // happy・komari は blink を 0 にしたまま目を閉じるため、表情の重みも含める。
+    // 目を閉じる表情は blink を 0 にしたまま目を閉じるため、表情の重みも含める。
     this.material.uniforms.uBlinkWeight.value = Math.max(
       blinkWeight,
-      this.vrm.expressionManager?.getValue('happy') ?? 0,
-      this.vrm.expressionManager?.getValue('komari') ?? 0,
+      ...EYES_CLOSED_EXPRESSIONS.map((name) => this.vrm.expressionManager?.getValue(name) ?? 0),
     );
     this.material.uniforms.uWaveSpeed.value = this.config.waveSpeed;
     this.material.uniforms.uWaveScale.value = this.config.waveScale;
+    this.material.uniforms.uFilmIntensity.value = this.config.filmIntensity;
     this.material.uniforms.uMeniscusIntensity.value = this.config.meniscusIntensity;
     this.material.uniforms.uSparkleIntensity.value = this.config.sparkleIntensity;
     this.material.uniforms.uWaterColor.value.set(this.config.waterColor);

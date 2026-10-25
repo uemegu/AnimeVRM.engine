@@ -16,6 +16,10 @@ const SWEAT_SECONDS = 4;
 
 /** カメラが頭からこれより近い（アップの構図）ときは文字演出を出さない（頭の上の文字が画面の外に切れるため） */
 const TEXT_HIDE_DISTANCE = 1.45;
+/** 涙目のときの潤み（頬染めだけのときより水膜・涙だまり・きらめきを強くする） */
+const TEARY_EYE_SHINE = { intensity: 1.0, filmIntensity: 0.3, meniscusIntensity: 2.0, sparkleIntensity: 1.6 };
+/** 頬染めだけのときの潤み（瞳の色が残る程度にうっすら） */
+const BLUSH_EYE_SHINE = { intensity: 0.6, filmIntensity: 0.15, meniscusIntensity: 1.2, sparkleIntensity: 1.1 };
 const _headPos = new THREE.Vector3();
 
 /** 目のハイライト・瞳のマテリアル（頬赤のとき揺らして潤ませる。元の値に戻せるよう控えておく） */
@@ -109,6 +113,7 @@ export class AvatarEffects {
   /** 頬赤・涙目の間は目を潤ませる */
   private updateEyeShine(): void {
     const enabled = this.blush || this.tearyEyes;
+    this.wateryEyes.updateConfig(this.tearyEyes ? TEARY_EYE_SHINE : BLUSH_EYE_SHINE);
     this.wateryEyes.setEnabled(enabled);
     if (enabled) this.backupEyeMaterials();
     else this.restoreEyeMaterials();

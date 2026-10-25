@@ -8,7 +8,7 @@ import { applySmoothNormalsToHierarchy } from '../shader/SmoothNormalHelper';
 import type { MaterialStyleParams, OutlineConfig } from './visual';
 import { getSeamlessLoopClip } from '../animation/seamlessLoop';
 import { replaceHappyWithEyesOnly } from '../avatar/happyEyesOnly';
-import { registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
+import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
 import { addHandColliders } from '../avatar/handColliders';
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
@@ -636,7 +636,7 @@ export class StageAvatar {
     const manager = this.vrm.expressionManager;
 
     // 笑顔等で目が閉じている時は重複まばたきを防止
-    const happyWeight = Math.max(this.emotionWeights.get('happy') ?? 0, this.emotionWeights.get('komari') ?? 0);
+    const happyWeight = Math.max(...EYES_CLOSED_EXPRESSIONS.map((name) => this.emotionWeights.get(name) ?? 0));
     if (happyWeight > 0.6) {
       manager.setValue('blink', 0.0);
       this.blinkState = 'open';
