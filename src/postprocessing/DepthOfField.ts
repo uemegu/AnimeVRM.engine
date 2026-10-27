@@ -7,7 +7,10 @@ import { FullScreenQuad, Pass } from 'three/examples/jsm/postprocessing/Pass.js'
  * 本描画の深度を使うので、RenderPass の直後に置くこと（後ろのパスの出力先には今のフレームの深度がない）。
  * 各点は自分のぼけの半径の円の中から集め、集める先のぼけがその点まで届かないものは混ぜない。
  * ピントの合ったキャラは背景の点まで広がらないので、キャラの色が背景ににじまない。
+ * ピントは顔の1点に合わせるので、キャラの厚み（顔の表面・肩・髪）の分は前後ともぼかさない。
+ * 寄るほどピント面の画面が狭くなり、数 cm の奥行きの差でもぼけるため（顔アップで顔がぼけた）。
  */
+const SUBJECT_DEPTH = 0.35;
 const DepthOfFieldShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
@@ -16,6 +19,7 @@ const DepthOfFieldShader = {
     uNearFar: { value: new THREE.Vector2(0.1, 100) },
     uFocus: { value: 2 },
     uSharpRange: { value: 0 },
+    uSubjectDepth: { value: SUBJECT_DEPTH },
     // 「|奥行き - ピント| / 奥行き」が1のときのぼけの直径（px）
     uCocScale: { value: 0 },
     uMaxRadius: { value: 0 },
@@ -35,6 +39,7 @@ const DepthOfFieldShader = {
     uniform vec2 uNearFar;
     uniform float uFocus;
     uniform float uSharpRange;
+    uniform float uSubjectDepth;
     uniform float uCocScale;
     uniform float uMaxRadius;
     varying vec2 vUv;
@@ -46,8 +51,8 @@ const DepthOfFieldShader = {
     float cocAt(vec2 uv) {
       float depth = texture2D(tDepth, uv).x;
       float z = -perspectiveDepthToViewZ(depth, uNearFar.x, uNearFar.y);
-      // ピントより奥は uSharpRange だけ手前にずらして測る（その幅まではぼかさない）
-      float offset = z > uFocus ? max(z - uFocus - uSharpRange, 0.0) : uFocus - z;
+      // ピントの前後 uSubjectDepth（奥は uSharpRange のほうが広ければそちら）まではぼかさない
+      float offset = z > uFocus ? max(z - uFocus - max(uSharpRange, uSubjectDepth), 0.0) : max(uFocus - z - uSubjectDepth, 0.0);
       return min(0.5 * uCocScale * offset / max(z, 1e-3), uMaxRadius);
     }
 
