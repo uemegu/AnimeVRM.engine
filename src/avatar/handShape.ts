@@ -76,7 +76,9 @@ export function forEachVertex(
   const seen = new Map<THREE.BufferAttribute | THREE.InterleavedBufferAttribute, Set<number>>();
   vrm.scene.traverse((object) => {
     if (!(object instanceof THREE.SkinnedMesh) || !object.geometry.attributes.skinIndex) return;
-    const vertices = partVertices(object);
+    // 着せ替えで描画から外した肌も、手や布の当たり判定には元の形を使う。
+    const surface = object.geometry.userData.bodySurfaceVertices;
+    const vertices: number[] = Array.isArray(surface) ? surface : partVertices(object);
     if (!part(object, vertices)) return;
     const position = object.geometry.attributes.position;
     let done = seen.get(position);

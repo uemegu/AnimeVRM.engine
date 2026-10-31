@@ -56,12 +56,14 @@ interface BodyFloor {
   bands: THREE.Vector4[];
   bottom: number;
   top: number;
+  /** 通常は楕円（2）。体形を保つ指定の衣装は、横幅を増やさない丸い四角（4） */
+  power: number;
   /** 太もも：骨（raw）のローカル座標での付け根・膝と、それぞれの太さ */
   thighs: { bone: THREE.Object3D; start: THREE.Vector3; end: THREE.Vector3; startRadius: number; endRadius: number }[];
 }
 
 /** スカートの下の体の形を、肌のメッシュから測る。腰の肌がなければ null（底なし） */
-function measureFloor(vrm: VRM, skin: THREE.SkinnedMesh | null): BodyFloor | null {
+function measureFloor(vrm: VRM, skin: THREE.SkinnedMesh | null, precise = false): BodyFloor | null {
   const humanoid = vrm.humanoid;
   const hips = humanoid.getRawBoneNode('hips');
   const normalizedHips = humanoid.getNormalizedBoneNode('hips');
@@ -72,12 +74,17 @@ function measureFloor(vrm: VRM, skin: THREE.SkinnedMesh | null): BodyFloor | nul
 
   const legs = (['left', 'right'] as const).map((side) => ({ upper: humanoid.getRawBoneNode(`${side}UpperLeg`), lower: humanoid.getRawBoneNode(`${side}LowerLeg`) }));
   const pelvis: THREE.Vector3[] = [];
+  const surface = new Map<number, THREE.Vector3>();
   const thighPoints = legs.map(() => [] as THREE.Vector3[]);
   forEachVertex(
     vrm,
     (mesh, vertex) => {
       const bone = mainBone(mesh, vertex);
-      if (bone === hips) pelvis.push(restPosition(mesh, vertex).applyMatrix4(toFrame));
+      if (bone === hips || precise) {
+        const position = restPosition(mesh, vertex).applyMatrix4(toFrame);
+        if (precise) surface.set(vertex, position);
+        if (bone === hips) pelvis.push(position);
+      }
       legs.forEach((leg, i) => {
         if (bone === leg.upper) thighPoints[i].push(restPosition(mesh, vertex));
       });
@@ -92,17 +99,36 @@ function measureFloor(vrm: VRM, skin: THREE.SkinnedMesh | null): BodyFloor | nul
   const bands: THREE.Vector4[] = [];
   for (let i = 0; i < PELVIS_BANDS; i++) {
     const y = bottom + step * (i + 0.5);
-    const slice = pelvis.filter((p) => Math.abs(p.y - y) <= step);
+    let slice = pelvis.filter((p) => Math.abs(p.y - y) <= step);
+    if (precise) {
+      // Intersect the original skin at this height. A wide vertex band would give
+      // a slim waist the width of the hips, and inflate fitted waistbands.
+      const original = skin.geometry.userData.bodySurfaceIndices;
+      const indices: ArrayLike<number> = Array.isArray(original) ? original : (skin.geometry.index?.array ?? []);
+      const section: THREE.Vector3[] = [];
+      for (let t = 0; t + 2 < indices.length; t += 3) {
+        const triangle = [surface.get(indices[t]), surface.get(indices[t + 1]), surface.get(indices[t + 2])];
+        if (triangle.some((p) => !p)) continue;
+        for (let edge = 0; edge < 3; edge++) {
+          const a = triangle[edge]!;
+          const b = triangle[(edge + 1) % 3]!;
+          if (Math.abs(a.y - y) < 1e-7) section.push(a.clone());
+          if ((a.y - y) * (b.y - y) < 0) section.push(a.clone().lerp(b, (y - a.y) / (b.y - a.y)));
+        }
+      }
+      if (section.length >= 5) slice = section;
+    }
     if (slice.length < 5) {
       bands.push(bands[i - 1]?.clone() ?? new THREE.Vector4());
       continue;
     }
     const box = new THREE.Box3().setFromPoints(slice);
+    const spread = precise ? 1 : PELVIS_SPREAD;
     bands.push(new THREE.Vector4(
       (box.min.x + box.max.x) / 2,
       (box.min.z + box.max.z) / 2,
-      ((box.max.x - box.min.x) / 2) * PELVIS_SPREAD,
-      ((box.max.z - box.min.z) / 2) * PELVIS_SPREAD
+      ((box.max.x - box.min.x) / 2) * spread,
+      ((box.max.z - box.min.z) / 2) * spread
     ));
   }
 
@@ -120,7 +146,7 @@ function measureFloor(vrm: VRM, skin: THREE.SkinnedMesh | null): BodyFloor | nul
     };
     thighs.push({ bone: upper, start: upper.worldToLocal(a.clone()), end: upper.worldToLocal(b.clone()), startRadius: radiusNear(0, 0.35), endRadius: radiusNear(0.65, 1) });
   });
-  return { hips, align, bands, bottom, top, thighs };
+  return { hips, align, bands, bottom, top, thighs, power: precise ? 4 : 2 };
 }
 
 /** 頂点の半分以上がスカートの骨で動く部品（上着の裾 CoatSkirt は除く） */
@@ -145,8 +171,10 @@ uniform vec3 uDentN[2];
 uniform int uDentCount;
 uniform int uFloorEnabled;
 uniform mat4 uFloorFrame;
+uniform mat4 uFloorInverseFrame;
 uniform vec4 uFloorBands[${PELVIS_BANDS}];
 uniform vec2 uFloorY;
+uniform float uFloorPower;
 uniform vec4 uFloorThighA[2];
 uniform vec4 uFloorThighB[2];
 uniform int uFloorThighCount;
@@ -159,7 +187,8 @@ bool dentInsideBody(vec3 p) {
     int i0 = min(int(f), ${PELVIS_BANDS - 2});
     vec4 band = mix(uFloorBands[i0], uFloorBands[i0 + 1], f - float(i0));
     vec2 d = (q.xz - band.xy) / (band.zw + ${FLOOR_GAP.toFixed(4)});
-    if (dot(d, d) < 1.0) return true;
+    float shape = uFloorPower > 2.5 ? dot(d * d, d * d) : dot(d, d);
+    if (shape < 1.0) return true;
   }
   for (int k = 0; k < 2; k++) {
     if (k >= uFloorThighCount) break;
@@ -170,6 +199,28 @@ bool dentInsideBody(vec3 p) {
     if (length(p - a - ba * t) < r) return true;
   }
   return false;
+}
+`;
+
+/** 隠した肌がある衣装でも、元の体の表面より外側に布を保つ。腰の高さは変えない。 */
+const BODY_CLEARANCE = /* glsl */ `
+if (uDentCount > 0 && uFloorEnabled > 0 && dentInsideBody(transformed)) {
+  vec3 bodyFramePoint = (uFloorFrame * vec4(transformed, 1.0)).xyz;
+  vec3 outward = vec3(bodyFramePoint.x, 0.0, bodyFramePoint.z);
+  if (dot(outward, outward) < 1e-10) outward = vec3(0.0, 0.0, 1.0);
+  outward = normalize((uFloorInverseFrame * vec4(normalize(outward), 0.0)).xyz);
+  float lo = 0.0;
+  float hi = 0.004;
+  for (int k = 0; k < 5; k++) {
+    if (!dentInsideBody(transformed + outward * hi)) break;
+    hi *= 2.0;
+  }
+  for (int k = 0; k < 7; k++) {
+    float mid = 0.5 * (lo + hi);
+    if (dentInsideBody(transformed + outward * mid)) lo = mid;
+    else hi = mid;
+  }
+  transformed += outward * (hi + 0.001);
 }
 `;
 
@@ -232,8 +283,10 @@ export class ClothDent {
     uDentCount: { value: 0 },
     uFloorEnabled: { value: 0 },
     uFloorFrame: { value: new THREE.Matrix4() },
+    uFloorInverseFrame: { value: new THREE.Matrix4() },
     uFloorBands: { value: Array.from({ length: PELVIS_BANDS }, () => new THREE.Vector4()) },
     uFloorY: { value: new THREE.Vector2() },
+    uFloorPower: { value: 2 },
     uFloorThighA: { value: [new THREE.Vector4(), new THREE.Vector4()] },
     uFloorThighB: { value: [new THREE.Vector4(), new THREE.Vector4()] },
     uFloorThighCount: { value: 0 },
@@ -254,6 +307,7 @@ export class ClothDent {
       this.uniforms.uFloorEnabled.value = 1;
       floor.bands.forEach((band, i) => this.uniforms.uFloorBands.value[i].copy(band));
       this.uniforms.uFloorY.value.set(floor.bottom, floor.top);
+      this.uniforms.uFloorPower.value = floor.power;
       this.uniforms.uFloorThighCount.value = floor.thighs.length;
     }
   }
@@ -284,7 +338,9 @@ export class ClothDent {
     });
     if (capsules.length === 0 || palms.length < 2) return null;
 
-    const dent = new ClothDent(vrm, meshes[0], capsules, palms, measureFloor(vrm, skin), enabled);
+    const precise = meshes.some((mesh) => (Array.isArray(mesh.material) ? mesh.material : [mesh.material])
+      .some((material) => material.userData.clothBodyProfile === true));
+    const dent = new ClothDent(vrm, meshes[0], capsules, palms, measureFloor(vrm, skin, precise), enabled);
     // 前後のスカートなどが同じ材質を共有していても、書き足すのは1回だけ（2回だと宣言が重なって描けなくなる）
     const materials = new Set(meshes.flatMap((mesh) => (Array.isArray(mesh.material) ? mesh.material : [mesh.material])));
     for (const material of materials) dent.patch(material);
@@ -292,6 +348,7 @@ export class ClothDent {
   }
 
   private patch(material: THREE.Material): void {
+    const bodyClearance = material.userData.clothBodyClearance === true;
     const baseCompile = material.onBeforeCompile;
     const baseCacheKey = material.customProgramCacheKey;
     material.onBeforeCompile = (shader, renderer) => {
@@ -299,9 +356,9 @@ export class ClothDent {
       Object.assign(shader.uniforms, this.uniforms);
       shader.vertexShader = shader.vertexShader
         .replace('void main() {', `${DECLARATIONS}\nvoid main() {`)
-        .replace('#include <skinning_vertex>', `#include <skinning_vertex>\n${DENT}`);
+        .replace('#include <skinning_vertex>', `#include <skinning_vertex>\n${bodyClearance ? BODY_CLEARANCE : ''}\n${DENT}`);
     };
-    material.customProgramCacheKey = () => `${baseCacheKey.call(material)},clothDent`;
+    material.customProgramCacheKey = () => `${baseCacheKey.call(material)},clothDent,bodyClearance=${bodyClearance}`;
     material.needsUpdate = true;
   }
 
@@ -346,6 +403,7 @@ export class ClothDent {
     for (const thigh of floor.thighs) thigh.bone.updateWorldMatrix(true, false);
     _frame.multiplyMatrices(floor.hips.matrixWorld, floor.align).invert();
     this.uniforms.uFloorFrame.value.multiplyMatrices(_frame, this.mesh.matrixWorld);
+    this.uniforms.uFloorInverseFrame.value.copy(this.uniforms.uFloorFrame.value).invert();
     floor.thighs.forEach((thigh, i) => {
       _a.copy(thigh.start).applyMatrix4(thigh.bone.matrixWorld).applyMatrix4(_inverse);
       _b.copy(thigh.end).applyMatrix4(thigh.bone.matrixWorld).applyMatrix4(_inverse);
