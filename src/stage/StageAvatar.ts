@@ -9,7 +9,6 @@ import type { MaterialStyleParams, OutlineConfig } from './visual';
 import { getSeamlessLoopClip } from '../animation/seamlessLoop';
 import { replaceHappyWithEyesOnly } from '../avatar/happyEyesOnly';
 import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
-import { addHandColliders } from '../avatar/handColliders';
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
@@ -399,7 +398,7 @@ export class StageAvatar {
           VRMUtils.rotateVRM0(vrm);
           replaceHappyWithEyesOnly(vrm);
           registerShapeKeyExpressions(vrm);
-          addHandColliders(vrm);
+          // 手と髪の接触判定は付けない（髪が手に当たって崩れるため）。handColliders.ts は残してある
           this.handClearance = HandClearance.create(vrm, this.handClearanceMode);
           // 手と頭の形は読み込み時の姿勢で測る
           this.heldItem = new HeldItem(vrm);
