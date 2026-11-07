@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
 import { FaceOverlayEffect } from '../effects/FaceOverlayEffect';
 import { WateryEyeEffect } from '../effects/eye/WateryEyeEffect';
+import { IrisShrinkEffect } from '../effects/eye/IrisShrinkEffect';
 import { TearEffect } from '../effects/tears/TearEffect';
 import { CryFaceEffect } from '../effects/cry/CryFaceEffect';
 import { SweatEffect } from '../effects/sweat/SweatEffect';
@@ -20,7 +21,11 @@ const TEXT_HIDE_DISTANCE = 1.45;
 const TEARY_EYE_SHINE = { intensity: 1.0, filmIntensity: 0.3, meniscusIntensity: 2.0, sparkleIntensity: 1.6 };
 /** 頬染めだけのときの潤み（瞳の色が残る程度にうっすら） */
 const BLUSH_EYE_SHINE = { intensity: 0.6, filmIntensity: 0.15, meniscusIntensity: 1.2, sparkleIntensity: 1.1 };
+/** 赤面のときの瞳の大きさ（驚いて瞳が縮む） */
+const REDFACE_IRIS_SCALE = 0.62;
 const _headPos = new THREE.Vector3();
+const _eyesPos = new THREE.Vector3();
+const _eyePos = new THREE.Vector3();
 
 /** 目のハイライト・瞳のマテリアル（頬赤のとき揺らして潤ませる。元の値に戻せるよう控えておく） */
 interface EyeMaterialBackup {
@@ -57,6 +62,9 @@ export class AvatarEffects {
   private faceSweat = false;
   private tearsOn = false;
   private redface = false;
+  private redfaceWeight = 0;
+  private redfaceMeshes: THREE.Mesh[] | null = null;
+  private readonly irisShrink: IrisShrinkEffect;
   private tearyEyes = false;
   private awawaMouth = false;
   private highlights: EyeMaterialBackup[] = [];
@@ -73,6 +81,7 @@ export class AvatarEffects {
     this.vrm = vrm;
     this.scene = scene;
     this.faceOverlay = new FaceOverlayEffect(vrm.scene);
+    this.irisShrink = new IrisShrinkEffect(vrm.scene);
     this.wateryEyes = new WateryEyeEffect(vrm, { enabled: false });
     this.tears = new TearEffect(vrm, { enabled: false });
     this.sweat = new SweatEffect(vrm, { enabled: false });
@@ -88,11 +97,47 @@ export class AvatarEffects {
     this.updateEyeShine();
   }
 
-  /** 赤面（頬を赤らめるより濃く広い） */
+  /** 赤面（顔に濃い斜線と汗を描き、目を見開いて眉を下げる） */
   public setRedface(enabled: boolean): void {
     if (this.redface === enabled) return;
     this.redface = enabled;
     void this.faceOverlay.setEnabled('redface', enabled).catch((err) => console.warn('Failed to show red face:', err));
+  }
+
+  /**
+   * 赤面の目・眉（指定した表情の目・眉に代えて、垂れ眉と見開いた目にする。瞳は縮めてハイライトを消す）。
+   * vrm.update の後に呼ぶ
+   */
+  private applyRedfaceFace(delta: number, blinkWeight: number): void {
+    const target = this.redface ? 1 : 0;
+    const before = this.redfaceWeight;
+    this.redfaceWeight = THREE.MathUtils.damp(this.redfaceWeight, target, 18, delta);
+    if (Math.abs(this.redfaceWeight - target) < 0.01) this.redfaceWeight = target;
+    if (this.redfaceWeight === 0 && before === 0) return;
+    this.irisShrink.setScale(THREE.MathUtils.lerp(1, REDFACE_IRIS_SCALE, this.redfaceWeight));
+    if (!this.redfaceMeshes) {
+      this.redfaceMeshes = [];
+      this.vrm.scene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.isMesh && mesh.morphTargetDictionary?.Fcl_BRW_Sorrow !== undefined) this.redfaceMeshes!.push(mesh);
+      });
+    }
+    const w = this.redfaceWeight;
+    // まばたきの間は見開きを弱める（閉じた目と見開きが重なって崩れないように）
+    const open = w * (1 - blinkWeight);
+    for (const mesh of this.redfaceMeshes) {
+      const dict = mesh.morphTargetDictionary!;
+      const influences = mesh.morphTargetInfluences!;
+      for (const [name, index] of Object.entries(dict)) {
+        if (name.startsWith('Fcl_BRW_')) {
+          influences[index] = name === 'Fcl_BRW_Sorrow' ? THREE.MathUtils.lerp(influences[index], 1, w) : influences[index] * (1 - w);
+        } else if (name === 'Fcl_EYE_Highlight_Hide') {
+          influences[index] = THREE.MathUtils.lerp(influences[index], 1, w);
+        } else if (name.startsWith('Fcl_EYE_') && !name.startsWith('Fcl_EYE_Close') && !/Hide$/.test(name)) {
+          influences[index] = name === 'Fcl_EYE_Surprised' ? THREE.MathUtils.lerp(influences[index], 1, open) : influences[index] * (1 - w);
+        }
+      }
+    }
   }
 
   /** 涙目（目を潤ませ、目尻に涙の粒をためる）。drops が false なら粒は出さない（髪が目尻にかかるキャラ） */
@@ -229,14 +274,28 @@ export class AvatarEffects {
   /** 毎フレームの更新（vrm.update の後） */
   public update(delta: number, elapsed: number, camera: THREE.Camera, renderer: THREE.WebGLRenderer, blinkWeight: number): void {
     const head = this.vrm.humanoid?.getNormalizedBoneNode('head');
-    if (head) this.texts.setVisible(camera.position.distanceTo(head.getWorldPosition(_headPos)) >= TEXT_HIDE_DISTANCE);
+    if (head) {
+      head.getWorldPosition(_headPos);
+      this.texts.setVisible(camera.position.distanceTo(_headPos) >= TEXT_HIDE_DISTANCE);
+      this.faceOverlay.updateHatch(camera, this.getEyesCenter(head));
+    }
     this.texts.update(delta, camera);
     this.tears.update(delta);
     this.sweat.update(delta);
     this.cryFace.update(delta, elapsed, camera);
+    this.applyRedfaceFace(delta, blinkWeight);
     this.wateryEyes.update(delta, elapsed, blinkWeight);
     if (this.blush || this.tearyEyes) this.wobbleEyeMaterials(elapsed);
     this.fastMotion?.update(delta, elapsed, camera, renderer);
+  }
+
+  /** 両目の中点（目の骨がなければ頭の骨から上に寄せた位置） */
+  private getEyesCenter(head: THREE.Object3D): THREE.Vector3 {
+    const humanoid = this.vrm.humanoid;
+    const left = humanoid?.getNormalizedBoneNode('leftEye');
+    const right = humanoid?.getNormalizedBoneNode('rightEye');
+    if (left && right) return left.getWorldPosition(_eyesPos).add(right.getWorldPosition(_eyePos)).multiplyScalar(0.5);
+    return head.getWorldPosition(_eyesPos).add(_eyePos.set(0, 0.06, 0));
   }
 
   private backupEyeMaterials(): void {
@@ -296,6 +355,7 @@ export class AvatarEffects {
 
   public dispose(): void {
     this.restoreEyeMaterials();
+    this.irisShrink.dispose();
     this.faceOverlay.dispose();
     this.wateryEyes.dispose();
     this.tears.dispose();
