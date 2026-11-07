@@ -4,11 +4,11 @@ import * as THREE from 'three';
  * 天使の輪（髪の帯状ハイライト）
  *
  * 頭の向きを基準に、頭の中心から一定の高さにある水平な帯を描く。
- * 頭の向きに追従するので、正面・側面・後ろのどこから見ても頭に対して水平な輪になる。
+ * 頭の向きに追従するので、どこから見ても頭に対して水平な輪になる（後頭部側には出さない）。
  * （カメラ基準や頭を球とみなした角度基準にすると、前後に長い頭では側面から見て輪が斜めになる）
  * 帯は頭の正面で最も高く、横・後ろへ回り込むほど下がる（arc）。頭頂のドームに沿った「∩」型の弧になり、
  * 頭の向きを基準にしているので、頭を回すと輪も一緒に回る（カメラ基準だと光だけが画面に固定されて見える）。
- * 帯の高さはカメラの仰角でも少し動き、下の縁は頭の周りの角度に沿って毛束のようにギザギザにする。
+ * 下の縁は頭の周りの角度に沿って毛束のようにギザギザにする。
  * 色はライティング後の髪色を時間帯ごとの色（tint）に寄せた色なので、髪色・時間帯になじむ。
  *
  * パラメータは数値だけなので全アバター・全レンダラーで共有する（HAIR_RING_UNIFORMS）。
@@ -23,8 +23,7 @@ export interface HairRingParams {
   width: number;
   // 帯の境界のぼかし幅（m。小さいほどくっきり）
   softness: number;
-  // 輪を出す範囲（頭の面がカメラを向く度合い）。この値から +0.3 までで立ち上がり、
-  // カメラを向いた範囲だけの弧になる（大きいほど輪が短い）
+  // 未使用（輪を出す範囲はシェーダーの viewFacing・headFacing で決めている）
   facingFade: number;
   // 髪色を tint に寄せる量（0 = 髪色のまま, 1 = tint）
   lighten: number;
@@ -40,7 +39,7 @@ export interface HairRingParams {
   jagAmplitude: number;
   // 毛先の数（頭一周あたり）
   jagCount: number;
-  // カメラの仰角で帯を上下させる量（m）。上から見るほど輪が上がる
+  // 未使用（帯の高さは頭の座標系だけで決めている）
   viewShift: number;
   // 弧の反り（m）。頭の正面から横に 90° 回り込んだ所で、正面よりこれだけ下がる
   arc: number;
@@ -86,6 +85,8 @@ export const HAIR_RING_UNIFORMS = {
   uHairRingArc: { value: DEFAULT_HAIR_RING_PARAMS.arc },
   uHairRingGapCount: { value: DEFAULT_HAIR_RING_PARAMS.gapCount },
   uHairRingGapRate: { value: DEFAULT_HAIR_RING_PARAMS.gapRate },
+  // 日差しのリムライト（shader/SilhouetteRim.ts）用: 光の向き（ビュー空間の画面方向）
+  uSunLightViewDir: { value: new THREE.Vector2(-0.8, 0.6) },
 };
 
 export function setHairRingParams(params: Partial<HairRingParams>): void {
@@ -212,13 +213,14 @@ export function injectHairRing(
       // 頭に対する高さ。実際の法線で少し揺らして毛束感を出す
       float h = dot(rel, upV) + dot(n, upV) * uHairRingStrandJitter;
 
-      // 帯の中心はカメラの仰角で少し動かす（カメラはビュー空間の原点）
-      float elevation = dot(normalize(-centerV), upV);
-      float center = uHairRingHeight + elevation * uHairRingViewShift;
+      // 帯の中心は頭の座標系を基準にする（頭の傾きで暴れないよう安定化）
+      float center = uHairRingHeight;
 
       // 弧: 頭の水平面上で、頭の正面からどれだけ回り込んでいるか（0 = 正面, 1 = 真横）
       vec3 relFlat = rel - upV * dot(rel, upV);
-      float turn = min(1.0 - dot(normalize(relFlat), fwdV), 1.0);
+      float lenFlat = length(relFlat);
+      float fwdDot = lenFlat > 1e-4 ? dot(relFlat / lenFlat, fwdV) : 1.0;
+      float turn = clamp(1.0 - fwdDot, 0.0, 1.0);
       center -= uHairRingArc * turn;
 
       // 下の縁の毛先（頭の周りの角度で区切り、毛先ごとに長さをばらつかせる。頭と一緒に回る）
@@ -232,15 +234,16 @@ export function injectHairRing(
       float band = smoothstep(lower - uHairRingSoftness, lower, h)
                  * (1.0 - smoothstep(upper, upper + uHairRingSoftness, h));
 
-      // カメラを向いた範囲だけに出す（輪の両端は途切れる）
-      float facing = dot(normalize(rel), normalize(-viewPos));
-      float fade = smoothstep(uHairRingFacingFade, uHairRingFacingFade + 0.3, facing);
+      // カメラを向いた面、かつ頭の正面〜側面側に出す（見上げ・お辞儀でも唐突に消えないようにする）
+      float viewFacing = dot(n, normalize(-viewPos));
+      float headFacing = fwdDot; // 頭の前方度合い (-1 = 真後ろ, +1 = 正面)
+      float fade = smoothstep(0.0, 0.3, viewFacing) * smoothstep(-0.2, 0.2, headFacing);
 
       // 途切れ: 頭の周りを区切り、一部の区間だけ輪を消す（頭と一緒に回る）
       float gapSeg = floor(azimuth / 6.2831853 * uHairRingGapCount);
       float gap = step(hairRingHash(gapSeg + 31.7), uHairRingGapRate);
 
-      float lit = smoothstep(0.2, 0.6, hairRingShading);
+      float lit = smoothstep(0.1, 0.5, hairRingShading);
       float ring = band * fade * lit * (1.0 - gap) * uHairRingStrength * uHairRingTarget;
 
       vec3 ringCol = mix(col, uHairRingTint, uHairRingLighten);

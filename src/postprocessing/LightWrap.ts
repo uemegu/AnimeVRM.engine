@@ -122,7 +122,7 @@ export interface LightWrapParams {
 }
 
 export const DEFAULT_LIGHT_WRAP_PARAMS: LightWrapParams = {
-  enabled: true,
+  enabled: false,
   radius: 0.012,
   strength: 0.4,
   edgePower: 1.5,
@@ -137,7 +137,7 @@ export const LightWrapShader = {
     // 髪だけの深度（HairShadowRenderer.depthTexture）
     tHair: { value: null as THREE.Texture | null },
     uResolution: { value: new THREE.Vector2(1, 1) },
-    uEnabled: { value: 1.0 },
+    uEnabled: { value: 0.0 },
     uRadius: { value: DEFAULT_LIGHT_WRAP_PARAMS.radius },
     uStrength: { value: DEFAULT_LIGHT_WRAP_PARAMS.strength },
     uEdgePower: { value: DEFAULT_LIGHT_WRAP_PARAMS.edgePower },

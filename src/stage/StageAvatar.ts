@@ -171,7 +171,10 @@ export async function loadMixamoAnimation(url: string, vrm: VRM): Promise<THREE.
             Array.from(values).map((v, i) => (vrm.meta?.metaVersion === '0' && i % 2 === 0 ? -v : v))
           )
         );
-      } else if (track instanceof THREE.VectorKeyframeTrack) {
+      } else if (track instanceof THREE.VectorKeyframeTrack && vrmBoneName === 'hips' && propertyName === 'position') {
+        // 移すのは腰の位置だけ。FBX には他の骨の position や scale のトラックを持つものがあり、
+        // 移すと正規化ボーンの座標が潰れる（scale 1 に腰の縮尺を掛けて 0.01 になり、頭の位置が腰まで落ちる）。
+        // 生の骨へは回転と腰の位置しか写らないので見た目は変わらず、頭の位置を読む処理（天使の輪・視線・ピント）だけがずれる
         const value = Array.from(track.values).map(
           (v, i) => (vrm.meta?.metaVersion === '0' && i % 3 !== 1 ? -v : v) * hipsPositionScale
         );
@@ -190,10 +193,9 @@ export async function loadMixamoAnimation(url: string, vrm: VRM): Promise<THREE.
 }
 
 /**
- * 鎖骨の回転をどれだけ残すか。Mixamo の待機モーションは鎖骨を 10〜15° 下げるので、
- * そのまま移すとアニメ体型ではなで肩に見える
+ * 鎖骨を下げる回転だけを弱める。腕を上げるときの肩の持ち上がりはそのまま残す。
  */
-const SHOULDER_ROTATION_SCALE = 0.5;
+const SHOULDER_DEPRESSION_SCALE = 0.5;
 /** 首・頭が視線の先へ追う速さ（1/秒）と、胸が頭の向きを追う速さ（遅いほど遅れる） */
 const HEAD_FOLLOW_RATE = 6;
 const CHEST_FOLLOW_RATE = 2.5;
@@ -201,10 +203,10 @@ const CHEST_FOLLOW_RATE = 2.5;
 const GAZE_BLINK_RAD = THREE.MathUtils.degToRad(20);
 
 /**
- * 鎖骨の回転を弱め、そのぶんを上腕で打ち消す（肩の高さだけ変わり、腕の向きは元のモーションのまま）。
+ * 鎖骨を下げる成分だけを弱め、その差分を上腕で打ち消す。挙上・水平回転・ひねりは保持する。
  * 正規化ボーンは基準姿勢の回転が単位なので、ローカル回転どうしの掛け算で合わせられる
  */
-function softenShoulder(tracks: THREE.KeyframeTrack[], vrm: VRM, shoulderBone: string, upperArmBone: string): void {
+function softenShoulder(tracks: THREE.KeyframeTrack[], vrm: VRM, shoulderBone: 'leftShoulder' | 'rightShoulder', upperArmBone: 'leftUpperArm' | 'rightUpperArm'): void {
   const shoulderName = vrm.humanoid?.getNormalizedBoneNode(shoulderBone as any)?.name;
   const upperArmName = vrm.humanoid?.getNormalizedBoneNode(upperArmBone as any)?.name;
   const shoulderIndex = tracks.findIndex((t) => t.name === `${shoulderName}.quaternion`);
@@ -212,10 +214,26 @@ function softenShoulder(tracks: THREE.KeyframeTrack[], vrm: VRM, shoulderBone: s
   const shoulder = tracks[shoulderIndex];
   const upperArm = tracks.find((t) => t.name === `${upperArmName}.quaternion`);
 
-  const identity = new THREE.Quaternion();
+  const restPosition = vrm.humanoid?.normalizedRestPose[upperArmBone]?.position;
+  if (!restPosition) return;
+  const restDirection = new THREE.Vector3().fromArray(restPosition).normalize();
+  if (restDirection.lengthSq() < 1e-8) return;
+  const restElevation = Math.asin(THREE.MathUtils.clamp(restDirection.y, -1, 1));
   const full = new THREE.Quaternion();
   const soft = new THREE.Quaternion();
-  const soften = (q: THREE.Quaternion) => soft.copy(identity).slerp(q, SHOULDER_ROTATION_SCALE);
+  const fullDirection = new THREE.Vector3();
+  const softDirection = new THREE.Vector3();
+  const soften = (q: THREE.Quaternion) => {
+    fullDirection.copy(restDirection).applyQuaternion(q).normalize();
+    const elevation = Math.asin(THREE.MathUtils.clamp(fullDirection.y, -1, 1));
+    if (elevation >= restElevation) return soft.copy(q);
+    const horizontal = Math.hypot(fullDirection.x, fullDirection.z);
+    if (horizontal < 1e-8) return soft.copy(q);
+    const softElevation = restElevation + (elevation - restElevation) * SHOULDER_DEPRESSION_SCALE;
+    const horizontalScale = Math.cos(softElevation) / horizontal;
+    softDirection.set(fullDirection.x * horizontalScale, Math.sin(softElevation), fullDirection.z * horizontalScale);
+    return soft.setFromUnitVectors(fullDirection, softDirection).multiply(q).normalize();
+  };
 
   if (upperArm) {
     // 上腕のキーの時刻で鎖骨の元の回転を取り、soft⁻¹ · full · upperArm に置き換える

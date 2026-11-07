@@ -12,7 +12,8 @@ export interface ToonShaderAvatarConfig {
 import { toggleSmoothNormalsInHierarchy } from './shader/SmoothNormalHelper';
 import { injectHairCrown } from './shader/HairCrown';
 import { createHairShadowUniforms, injectHairShadow, HAIR_SHADOW_LAYER, HairShadowUniforms } from './shader/HairShadow';
-import { injectHairRing, createHairRingHeadFrame, updateHairRingHeadFrame } from './shader/HairRing';
+import { injectHairRing, createHairRingHeadFrame, updateHairRingHeadFrame, HAIR_RING_UNIFORMS } from './shader/HairRing';
+import { SILHOUETTE_RIM_GLSL, SILHOUETTE_RIM_UNIFORMS } from './shader/SilhouetteRim';
 import { attachFaceSdf, createFaceSdfFrame, injectFaceSdf } from './shader/FaceSdf';
 import { createWetClothFrame, injectWetCloth, isWetClothMaterial, measureWetClothFrame, wetTextureFor } from './shader/WetCloth';
 import { CHARACTER_LAYER, EYE_LAYER } from './postprocessing/LightWrap';
@@ -74,7 +75,8 @@ type MToonLikeMaterial = THREE.Material & {
 const DEFAULT_FACE_PATTERN = /Face|Mouth|顔|口/i;
 const DEFAULT_BODY_PATTERN = /Body.*SKIN|body|skin|肌|体/i;
 const DEFAULT_HAIR_PATTERN = /Hair|hair|髪/i;
-const DEFAULT_CLOTH_PATTERN = /Shoes|Cloth|Tops|Bottoms|Onepiece|outfit|dress|jacket|shirt|skirt|shoes|suit|pant|服|靴|衣/i;
+const DEFAULT_CLOTH_PATTERN =
+  /Shoes|Cloth|Tops?|Bottoms?|Onepiece|outfit|dress|jacket|shirt|skirt|shoes|suit|pants?|shorts?|coat|hoodie|cardigan|sweater|blouse|vest|wear|denim|jeans?|ribbon|tie|socks?|stocking|accessory|hat|cap|glasses|服|靴|衣|装/i;
 
 export function isEyeMaterial(matName: string): boolean {
   if (/Eyeline|Eyelash|アイライン|まつ毛|まつげ/i.test(matName)) {
@@ -211,7 +213,9 @@ function classifyStyleMaterial(
     return 'body';
   }
 
-  return null;
+  // 3. Fallback for avatar MToon: any non-eye, non-face-feature, non-hair, non-skin material is clothes/accessory
+  // (e.g. casual clothes, private outfits, cardigans, Tripo clothing meshes)
+  return 'cloth';
 }
 
 export function applyToonShader(
@@ -348,6 +352,8 @@ export function applyToonShader(
         faceSdfMeshes.add(mesh);
         faceSdfTargets.push(faceSdfTarget);
       }
+      // 外形のリムライト: 1 = 髪, 2 = 服, 3 = 肌（目・眉などの顔のパーツは光らせない）
+      const silRimKind = { value: kind === 'hair' ? 1 : kind === 'cloth' ? 2 : kind === 'face' || kind === 'body' ? 3 : 0 };
       // 雨で濡れるのは白いYシャツ（アウトラインを除く）。濡れた版のテクスチャがあれば使う
       const wetClothTarget = {
         value: !material.isOutline && kind === 'cloth' && isWetClothMaterial(material.name || '', material.map ? getTextureAverageColor(material.map) : null) ? 1 : 0,
@@ -473,6 +479,13 @@ export function applyToonShader(
         shader.uniforms.uLitHighlightStrength = litHighlightStrength;
         shader.uniforms.uLitHighlightThreshold = litHighlightThreshold;
         shader.uniforms.uLitHighlightColor = litHighlightColor;
+        const clothSunlitRimColor = { value: new THREE.Color('#eaf2ff') };
+        const skinSunlitRimColor = { value: new THREE.Color('#fff5ea') };
+        shader.uniforms.uSilRimKind = silRimKind;
+        Object.assign(shader.uniforms, SILHOUETTE_RIM_UNIFORMS);
+        shader.uniforms.uSunLightViewDir = HAIR_RING_UNIFORMS.uSunLightViewDir;
+        shader.uniforms.uClothSunlitRimColor = clothSunlitRimColor;
+        shader.uniforms.uSkinSunlitRimColor = skinSunlitRimColor;
         shader.fragmentShader = shader.fragmentShader
           .replace(
             'uniform vec3 litFactor;',
@@ -484,6 +497,10 @@ export function applyToonShader(
           uniform float uLitHighlightStrength;
           uniform float uLitHighlightThreshold;
           uniform vec3 uLitHighlightColor;
+          uniform float uSilRimKind;
+          uniform vec2 uSunLightViewDir;
+          uniform vec3 uClothSunlitRimColor;
+          uniform vec3 uSkinSunlitRimColor;
           float mtoonPrimaryShading = 0.0;
           float mtoonPrimaryDotNL = 1.0;
           vec3 mtoonTerminator( const in vec3 col, const in float shading ) {
@@ -540,6 +557,38 @@ export function applyToonShader(
     float outlineLightLuma = dot( reflectedLight.directDiffuse + rimMix * rim, vec3( 0.2126, 0.7152, 0.0722 ) );
     float traceBlend = clamp( outlineLightLuma * 0.35, 0.0, 0.38 ) * clamp( outlineLightingMixFactor + 0.35, 0.0, 1.0 );
     col = mix( baseOutline, max( baseOutline, col * 0.62 ), traceBlend );
+  #endif
+  // 日差し側の外形（背景との境目）のすぐ内側だけを光らせる。輪郭線は元の色のまま残す
+  // （理想の絵: 背景 → 暗い輪郭線 → 明るい帯 → 地の色）。毛束・襟・袖など内側の縁は光らない（判定は shader/SilhouetteRim.ts）
+  #if !defined( OUTLINE )
+  if ( uSilRimKind > 0.5 ) {
+    // 日差しと反対を向いた面（外形の向こうへ回り込んだ裏側）は光らせない。マスクを何度も読むので、先に判定して飛ばす
+    float sunDot = dot( normalize( normal ).xy, uSunLightViewDir );
+    float sunSide = smoothstep( -0.35, 0.2, sunDot );
+    float silRim = sunSide > 0.0 ? silhouetteRimFactor( -vViewPosition, uSunLightViewDir ) * sunSide : 0.0;
+
+    if ( silRim > 0.001 ) {
+      // ハイライトの芯（コア）: 理想の作画同様、エッジ中心が眩しく光り輝く白金色コア
+      float rimCore = smoothstep( 0.45, 0.95, silRim );
+
+      if ( uSilRimKind < 1.5 ) {
+        // 髪: 明るいアンバーに、芯の強烈な日差し白金コア（実測RGB 255,215,162超）を融合
+        vec3 baseHairRim = vec3( 1.0, 0.84, 0.58 );
+        vec3 targetHairRim = mix( max( baseHairRim, col + baseHairRim * 0.5 ), vec3( 1.0, 0.96, 0.88 ), rimCore * 0.8 );
+        col = mix( col, targetHairRim * uSilRimLightColor, silRim * 0.98 );
+      } else if ( uSilRimKind < 2.5 ) {
+        // 服: 暗いブレザーも白い私服も、眩しい純白の光彩コアでキラリと輝かせる
+        vec3 baseClothRim = mix( uClothSunlitRimColor, vec3( 0.90, 0.93, 1.0 ), 0.6 );
+        vec3 targetClothRim = mix( max( baseClothRim, col + baseClothRim * 0.55 ), vec3( 1.0, 1.0, 1.0 ), rimCore * 0.75 );
+        col = mix( col, targetClothRim * uSilRimLightColor, silRim * 0.98 );
+      } else {
+        // 肌（首筋・腕・顔輪郭）: 眩しいゴールドピーチの光彩コア
+        vec3 baseSkinRim = mix( uSkinSunlitRimColor, vec3( 1.0, 0.97, 0.88 ), 0.6 );
+        vec3 targetSkinRim = mix( max( baseSkinRim, col + baseSkinRim * 0.5 ), vec3( 1.0, 0.98, 0.92 ), rimCore * 0.7 );
+        col = mix( col, targetSkinRim * uSilRimLightColor, silRim * 0.95 );
+      }
+    }
+  }
   #endif`
           );
 
@@ -563,6 +612,7 @@ export function applyToonShader(
           uniform float uBottomGradientShadowWeight;
           uniform vec3 uBottomGradientColor;
           uniform mat4 uCameraMatrixWorld;
+          ${SILHOUETTE_RIM_GLSL}
           void main() {
           `
         );

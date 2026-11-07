@@ -47,6 +47,7 @@ export type CameraShift = z.infer<typeof CameraShift>;
  * - push_in: 一度わずかに引いてから、勢いよく寄って構図へ着地する（溜め 0.12 秒で距離を 12% 引き、寄りながら画角を 2 割狭める。行きすぎは 4% 以内で戻る）
  * - dolly_out: 構図からカメラごと離れていく
  * - zoom_in / zoom_out: 位置はそのまま、構図から画角で寄っていく / 引いていく
+ * - fisheye_in: 構図から顔へ近づき、広角と魚眼の歪みを強める（amount は歪みの強さ）
  * - orbit_left / orbit_right: 被写体の周りを1周して構図へ戻る（カメラが左へ / 右へ回る。amount が周回数）
  * - crane_up: 構図からカメラが上へ昇りながら引いていく（被写体は見続ける）
  * - dolly_zoom: 被写体の大きさはそのまま、背景だけ寄って見える（カメラは離れ、画角を狭める）
@@ -63,6 +64,7 @@ export const CameraMoveType = z.enum([
   'dolly_out',
   'zoom_in',
   'zoom_out',
+  'fisheye_in',
   'orbit_left',
   'orbit_right',
   'crane_up',

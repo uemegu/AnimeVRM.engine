@@ -25,13 +25,15 @@ export interface StageQuality {
   godRaysSamples: number;
   /** 雨の地面の水たまり・空の映り込み・波紋（stage/RainGround.ts）。地面全面を毎フレーム塗るので PC 向け */
   wetGroundSheen: boolean;
+  /** リムライトの光のにじみ（postprocessing/RimBloomPass.ts）。半分の解像度で全画素を5回塗り、目のマスクも毎フレーム要る */
+  rimBloom: boolean;
 }
 
 export type StageQualityLevel = 'high' | 'low';
 
 export const STAGE_QUALITY_PRESETS: Record<StageQualityLevel, StageQuality> = {
-  high: { handClearance: 'precise', clothDent: true, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true },
-  low: { handClearance: 'simple', clothDent: true, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false },
+  high: { handClearance: 'precise', clothDent: true, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true, rimBloom: true },
+  low: { handClearance: 'simple', clothDent: true, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false, rimBloom: false },
 };
 
 /** 段階の手動指定。URL の ?quality=low か、localStorage の stage_quality（検証・切り替え用） */

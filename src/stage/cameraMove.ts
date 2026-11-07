@@ -43,6 +43,7 @@ function easeOutBack(t: number, c: number): number {
 /**
  * 構図のカメラ（base）にカメラの動きを重ねて camera に当てる。time はカット内の時刻（頭出ししても同じ絵になる）。
  * ドリーインは構図から離れた所から始めて構図へ着地する。ズームインは構図から画角で、顔の画面上の位置を中心に寄っていく
+ * 戻り値は、そのフレームに重ねる魚眼の強さ（通常の動きでは 0）。
  */
 export function applyCameraMove(
   camera: THREE.PerspectiveCamera,
@@ -52,12 +53,25 @@ export function applyCameraMove(
   baseFov: number,
   move: ResolvedCameraMove,
   time: number
-): void {
+): number {
   const progress = move.duration > 0 ? THREE.MathUtils.clamp((time - move.at) / move.duration, 0, 1) : 1;
   const eased = easeInOutCubic(progress);
   // 構図へ着地する動きは 1 → 0、構図から離れる動きは 0 → 1
   const landing = (1 - eased) * move.amount;
   const leaving = eased * move.amount;
+
+  if (move.type === 'fisheye_in' && face) {
+    // 元の構図から始め、前のめりになった実際の顔へ広角で寄る。
+    // 歪みで中心が拡大する分だけ距離を取り、顔全体と肩口を残す。
+    const direction = base.position.clone().sub(base.target).normalize();
+    const distance = 0.27 * (1 + 0.8 * move.amount);
+    const destination = face.clone().addScaledVector(direction, distance);
+    camera.position.lerpVectors(base.position, destination, eased);
+    camera.lookAt(base.target.clone().lerp(face, eased));
+    camera.fov = THREE.MathUtils.lerp(baseFov, Math.max(baseFov, 70), eased);
+    camera.updateProjectionMatrix();
+    return leaving;
+  }
 
   let yaw = 0;
   let pitch = 0;
@@ -170,4 +184,5 @@ export function applyCameraMove(
     camera.fov = fov;
     camera.updateProjectionMatrix();
   }
+  return 0;
 }
