@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { FullScreenQuad, Pass } from 'three/examples/jsm/postprocessing/Pass.js';
-import { createLayerDepthTarget, renderLayerDepth } from '../shader/LayerDepth';
+import { createLayerDepthTarget, renderLayerDepth, resizeDepthTarget } from '../shader/LayerDepth';
 
 /**
  * キャラのマスクとライトラップ
@@ -32,7 +32,7 @@ export class CharacterMaskRenderer {
   }
 
   public setSize(width: number, height: number): void {
-    this.renderTarget.setSize(width, height);
+    resizeDepthTarget(this.renderTarget, width, height);
   }
 
   public render(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): void {
@@ -91,7 +91,7 @@ export class VisibleMaskPass extends Pass {
   }
 
   setSize(width: number, height: number): void {
-    this.target.setSize(width, height);
+    resizeDepthTarget(this.target, width, height);
   }
 
   render(renderer: THREE.WebGLRenderer): void {

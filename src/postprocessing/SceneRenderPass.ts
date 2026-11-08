@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FullScreenQuad, Pass } from 'three/examples/jsm/postprocessing/Pass.js';
 import { CopyShader } from 'three/examples/jsm/shaders/CopyShader.js';
+import { resizeDepthTarget } from '../shader/LayerDepth';
 
 /**
  * シーンを MSAA の的に描き、composer の画面（readBuffer）へ写す（RenderPass の代わり）。
@@ -43,7 +44,7 @@ export class SceneRenderPass extends Pass {
   }
 
   setSize(width: number, height: number): void {
-    this.target.setSize(width, height);
+    resizeDepthTarget(this.target, width, height);
   }
 
   render(renderer: THREE.WebGLRenderer, _writeBuffer: THREE.WebGLRenderTarget, readBuffer: THREE.WebGLRenderTarget): void {

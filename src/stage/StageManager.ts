@@ -2202,6 +2202,9 @@ export class StageManager {
   }
 
   public resize(width: number, height: number): void {
+    // ResizeObserver の寸法は小数になる（688.5 など）。描画ターゲットが小数サイズだと全体がぼけて色も崩れるので、整数に丸める
+    width = Math.floor(width);
+    height = Math.floor(height);
     if (height <= 0 || width <= 0) return;
     const pr = this.pixelRatio();
     this.camera.aspect = width / height;

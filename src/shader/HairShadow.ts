@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createLayerDepthTarget, renderLayerDepth } from './LayerDepth';
+import { createLayerDepthTarget, renderLayerDepth, resizeDepthTarget } from './LayerDepth';
 
 /**
  * スクリーンスペース方式の前髪の影
@@ -156,7 +156,7 @@ export class HairShadowRenderer {
   }
 
   public setSize(width: number, height: number): void {
-    this.renderTarget.setSize(width, height);
+    resizeDepthTarget(this.renderTarget, width, height);
   }
 
   public setParams(params: Partial<HairShadowParams>): void {

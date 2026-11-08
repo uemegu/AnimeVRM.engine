@@ -15,6 +15,21 @@ export function createLayerDepthTarget(width: number, height: number): THREE.Web
   });
 }
 
+/**
+ * 深度テクスチャ付きのターゲットの大きさを変える。
+ * three は setSize でターゲットを作り直すが、深度テクスチャの image の寸法はそのままなので、次に描くとき
+ * 寸法の不一致から needsUpdate が立ち、作り直した深度が材質から正しく読めなくなる（外形のリムライトが全身にかかって白っぽくなる）。
+ * 先に image の寸法を合わせておく。
+ */
+export function resizeDepthTarget(target: THREE.WebGLRenderTarget, width: number, height: number): void {
+  target.setSize(width, height);
+  const depth = target.depthTexture;
+  if (depth) {
+    depth.image.width = width;
+    depth.image.height = height;
+  }
+}
+
 export function renderLayerDepth(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
