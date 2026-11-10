@@ -10,7 +10,8 @@ import * as THREE from 'three';
  * 髪の下の顔・毛束同士・シャツの上の襟は奥行きの差が小さいので光らない。
  * 輪郭線は光らせず元の色のまま残し、その内側に帯を置く（背景 → 暗い輪郭線 → 明るい帯 → 地の色）。
  *
- * 帯の幅は画面の px で決まる（720 行で uSilRimWidth px。輪郭線の分を含む）。キャラ本体の描画（MSAA）の中で色を決めるので、
+ * 帯の幅は画面の px で決まる（720 行で uSilRimWidth px。輪郭線の分を含む）。面が日差しへ向くほど広く、
+ * 斜めになるほど細くして消す（同じ太さの白い線ではなく、太い所と消える所のある面にする）。キャラ本体の描画（MSAA）の中で色を決めるので、
  * 帯の外側の境目はアンチエイリアスされる。
  */
 export const SILHOUETTE_RIM_UNIFORMS = {
@@ -82,15 +83,15 @@ export const SILHOUETTE_RIM_GLSL = /* glsl */ `
     return -(n * f) / ((f - n) * d - f);
   }
 
-  // 0..1。外形の上（日差し側）で 1、内側へ uSilRimWidth px で 0 へ落ちる。内側の縁では 0
-  float silhouetteRimFactor(vec3 viewPos, vec2 sunDir) {
+  // 0..1。外形の上（日差し側）で 1、内側へ uSilRimWidth * widthScale px で 0 へ落ちる。内側の縁では 0
+  float silhouetteRimFactor(vec3 viewPos, vec2 sunDir, float widthScale) {
     if (uSilRimStrength <= 0.0) return 0.0;
     vec4 clip = uSilRimProjection * vec4(viewPos, 1.0);
     vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
     vec2 res = vec2(textureSize(uSilRimMask, 0));
     if (res.x < 2.0) return 0.0;
     float selfZ = -viewPos.z;
-    float widthPx = uSilRimWidth * res.y / 720.0;
+    float widthPx = uSilRimWidth * widthScale * res.y / 720.0;
     // 日差しの方向と、その左右 35° の3方向へ進む（外形が日差しに斜めでも途切れないように）
     vec2 dirs[3];
     dirs[0] = sunDir;

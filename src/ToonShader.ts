@@ -565,7 +565,12 @@ export function applyToonShader(
     // 日差しと反対を向いた面（外形の向こうへ回り込んだ裏側）は光らせない。マスクを何度も読むので、先に判定して飛ばす
     float sunDot = dot( normalize( normal ).xy, uSunLightViewDir );
     float sunSide = smoothstep( -0.35, 0.2, sunDot );
-    float silRim = sunSide > 0.0 ? silhouetteRimFactor( -vViewPosition, uSunLightViewDir ) * sunSide : 0.0;
+    // 帯の幅は、面が日差しへ向くほど広く（肩・腿の正面で約1.5倍）、斜めの縁では細くして消す。
+    // 同じ太さの線で外形をなぞると白い縁取りに見えるので、太い所と消える所のある面にする
+    float silRimWidth = 1.5 * smoothstep( 0.1, 0.85, sunDot );
+    // 幅が輪郭線より細くなる所は、点々と残さずに薄くして消す
+    float silRimFade = smoothstep( 0.45, 1.0, silRimWidth );
+    float silRim = sunSide > 0.0 && silRimFade > 0.0 ? silhouetteRimFactor( -vViewPosition, uSunLightViewDir, silRimWidth ) * sunSide * silRimFade : 0.0;
 
     if ( silRim > 0.001 ) {
       // ハイライトの芯（コア）: 理想の作画同様、エッジ中心が眩しく光り輝く白金色コア
