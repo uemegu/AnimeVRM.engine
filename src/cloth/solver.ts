@@ -1,0 +1,700 @@
+import type { DistanceGrid } from './sdf';
+
+/**
+ * 布のソルバー（XPBD、CPU）。スカートを点と拘束の集まりとして解く。モデルや描画のことは知らない。
+ * 外から渡すのは、体の動き（frames）と、摘む・風だけ。VRM へのつなぎ込みは VrmSkirt.ts。
+ */
+// The skirt as cloth: XPBD with small substeps on the CPU.
+//   points       the skirt's vertices welded across UV seams (after `subdivide` splits every triangle in four)
+//   stretch      every triangle edge keeps its length
+//   bend         flat edges: the two vertices facing each other across the edge keep their distance, softly.
+//                creases (the pleats' folds, bent more than `creaseAngle` at rest): the signed fold angle itself is
+//                kept, stiffer, like a heat-set pleat: a distance cannot tell a fold from the same fold inside out
+//   self         points keep at least `thickness` apart (or their rest distance, where layers are stacked closer)
+//   tether       no point gets further from its nearest pinned point than in the rest shape (stops rubber-band
+//                stretch when the cloth is yanked)
+//   body         signed distance grid of the legs and hips (sdf.js), with friction
+//   air          per triangle, once a frame: pressure drag growing with the square of the speed through the air
+//                (0.5 * rho * Cd / fabric weight per area), wind shielded on the side the body and the far wall
+//                cover, and the air caught under the skirt when the body drops or the wind blows up into it
+//                (stagnation pressure, pushes every wall outward). Plus a small linear drag per point for damping
+// What moves the cloth from outside is given as frames (3x4 matrices, rest -> now), all interpolated over the substeps:
+//   frames.ref         the body as a whole (the hips): the frame in which "who is near whom" and the air caught under
+//                      the skirt are judged
+//   frames.colliders   one per distance grid: where that piece of the body is now
+//   frames.pinTarget   where each held point is now
+// A driver fills them before step() and sets `driven`. Without one, the body is one rigid piece moved by
+// `body` = (x, y, z, yaw about a vertical axis through `pivot`), and the held points follow it.
+
+// `extra` (optional): one more number per vertex, averaged the same way (used for "how free is this vertex")
+export function subdivide(position: ArrayLike<number>, uv: ArrayLike<number>, index: ArrayLike<number>, extra: ArrayLike<number> | null = null) {
+  const pos = Array.from(position), uvs = Array.from(uv), idx: number[] = [], mid = new Map<number, number>(), ext = extra ? Array.from(extra) : null;
+  const made: number[] = [];   // for every new vertex, the two it lies between
+  const m = (a: number, b: number): number => {
+    const k = a < b ? a * 1e7 + b : b * 1e7 + a;
+    let i = mid.get(k);
+    if (i === undefined) {
+      i = pos.length / 3; mid.set(k, i);
+      for (let c = 0; c < 3; c++) pos.push((pos[a * 3 + c] + pos[b * 3 + c]) / 2);
+      for (let c = 0; c < 2; c++) uvs.push((uvs[a * 2 + c] + uvs[b * 2 + c]) / 2);
+      if (ext) ext.push((ext[a] + ext[b]) / 2);
+      made.push(a, b);
+    }
+    return i;
+  };
+  for (let f = 0; f < index.length; f += 3) {
+    const a = index[f], b = index[f + 1], c = index[f + 2], ab = m(a, b), bc = m(b, c), ca = m(c, a);
+    idx.push(a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca);
+  }
+  return { position: new Float32Array(pos), uv: new Float32Array(uvs), index: new Uint32Array(idx), extra: ext ? new Float32Array(ext) : null, made: new Uint32Array(made), before: position.length / 3 };
+}
+
+// signed fold angle across the edge a-b, with c and d the third corners of its two triangles; 0 when flat
+export function foldAngle(X: ArrayLike<number>, a: number, b: number, c: number, d: number): number {
+  const p = (i: number, k: number) => X[i * 3 + k];
+  const sub = (i: number, j: number) => [p(i, 0) - p(j, 0), p(i, 1) - p(j, 1), p(i, 2) - p(j, 2)];
+  const cross = (u: number[], v: number[]) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const dot = (u: number[], v: number[]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const e = sub(b, a), n1 = cross(sub(c, a), sub(c, b)), n2 = cross(sub(d, b), sub(d, a));
+  return Math.atan2(dot(cross(n1, n2), e) / Math.hypot(...e), dot(n1, n2));
+}
+const GRAD_SIGN = -1;   // solveCreases' u is -d(angle)/dx (checked by finite differences, test-fold.mjs)
+
+// `free` (optional): per vertex, 1 = cloth, 0 = held to the body (from a rig's weights); without it the top is held
+// 3x4 matrices, row-major: [r00 r01 r02 tx  r10 r11 r12 ty  r20 r21 r22 tz]
+const I12 = () => Float64Array.of(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+function lerp12(a: Float64Array, b: Float64Array, t: number, out: Float64Array): void { for (let i = 0; i < 12; i++) out[i] = a[i] + (b[i] - a[i]) * t; }
+function inv12(m: Float64Array, out: Float64Array): void {
+  const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+  const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g, det = a * A + b * B + c * C, q = 1 / det;
+  const r0 = A * q, r1 = (c * h - b * i) * q, r2 = (b * f - c * e) * q;
+  const r3 = B * q, r4 = (a * i - c * g) * q, r5 = (c * d - a * f) * q;
+  const r6 = C * q, r7 = (b * g - a * h) * q, r8 = (a * e - b * d) * q;
+  out[0] = r0; out[1] = r1; out[2] = r2; out[3] = -(r0 * m[3] + r1 * m[7] + r2 * m[11]);
+  out[4] = r3; out[5] = r4; out[6] = r5; out[7] = -(r3 * m[3] + r4 * m[7] + r5 * m[11]);
+  out[8] = r6; out[9] = r7; out[10] = r8; out[11] = -(r6 * m[3] + r7 * m[7] + r8 * m[11]);
+}
+
+// `colliders` (optional): [{ sdf, rest }] distance grids of pieces of the body, each in its own space; `rest` is the
+// 3x4 matrix from that space to the world in the pose the cloth is given in (identity when left out). `sdf` alone is
+// one grid in world space.
+export interface ClothOptions {
+  substeps: number; gravity: number;
+  stretch: number; bend: number; crease: number; creaseAngle: number;
+  thickness: number; selfEvery: number; pairSlack: number; selfFriction: number;
+  shapeEvery: number; maxRebuilds: number; minEdge: number; maxSpeed: number;
+  shape: number; shapeMin: number; shapeMax: number; shapePer: number;
+  tetherSlack: number; margin: number; friction: number;
+  air: number; drag: number; inflate: number; shield: number; gust: number; maxAero: number;
+  damping: number; pinBelowTop: number; grabRadius: number;
+}
+export interface ClothCollider { sdf: DistanceGrid; rest?: Float64Array }
+export interface ClothInput {
+  position: ArrayLike<number>;
+  index: ArrayLike<number>;
+  sdf?: DistanceGrid | null;
+  colliders?: ClothCollider[] | null;
+  pivot: [number, number];
+  free?: ArrayLike<number> | null;
+  opts?: Partial<ClothOptions>;
+}
+interface Grab { ids: number[]; off: number[]; centre: number; target: number[]; prev: number[] }
+export type Cloth = ReturnType<typeof createCloth>;
+
+export function createCloth({ position, index, sdf = null, colliders = null, pivot, free = null, opts = {} }: ClothInput) {
+  const o: ClothOptions = {
+    substeps: 16, gravity: -9.8,
+    stretch: 0,        // compliance of the edges (0 = as stiff as the substeps allow)
+    bend: 2e-4,        // compliance of the bend distances; larger = limper cloth
+    crease: 2e-3, creaseAngle: 0.35,   // compliance of the fold angles (rad), and how bent an edge must be to count
+    thickness: 0.008, selfEvery: 1, pairSlack: 0.006, selfFriction: 0.15,
+    // selfEvery 1: solved every other substep, cloth folded on itself never came to rest. The other constraints pulled
+    // the layers together in the substeps between and this pushed them apart again (a seated skirt: 141 of 1097
+    // points above 0.3 m/s; solved every substep, 5)
+    shapeEvery: 2, maxRebuilds: 3,
+    minEdge: 0.0025,   // points closer than this along an edge are merged (Tripo leaves sub-millimetre triangles)
+    maxSpeed: 6,
+    shape: 2e-3,       // compliance of the long distances (see below); larger = the flare sags more
+    shapeMin: 0.05, shapeMax: 0.09, shapePer: 4,
+    tetherSlack: 1.06,
+    margin: 0.004, friction: 0.5,
+    air: 1,            // linear drag along the normal, 1/s
+    drag: 3.6,         // quadratic drag, 1/m: 0.5 * 1.2 kg/m3 * Cd 1.2 / 0.2 kg/m2
+    inflate: 2.4,      // caught air, 1/m: 0.5 * 1.2 / 0.2, times 0.8 for what leaks out
+    shield: 0.3,       // share of the wind that reaches a wall from its inner side
+    gust: 0.3,         // how much the wind differs from place to place
+    maxAero: 80,       // m/s2
+    damping: 0.4,      // plain velocity damping, 1/s
+    pinBelowTop: 0.012,   // points this close under the top rim are held too
+    grabRadius: 0.03,
+    ...opts,
+  };
+  const nR = position.length / 3;
+  // ---- weld ----
+  const ids = new Map<string, number>(), map = new Uint32Array(nR), rest: number[] = [];
+  for (let i = 0; i < nR; i++) {
+    const k = `${Math.round(position[i * 3] * 1e5)},${Math.round(position[i * 3 + 1] * 1e5)},${Math.round(position[i * 3 + 2] * 1e5)}`;
+    let id = ids.get(k);
+    if (id === undefined) { id = rest.length / 3; ids.set(k, id); rest.push(position[i * 3], position[i * 3 + 1], position[i * 3 + 2]); }
+    map[i] = id;
+  }
+  {
+    const m = rest.length / 3, par = Int32Array.from({ length: m }, (_, i) => i);
+    const find = (a: number): number => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+    for (let f = 0; f < index.length; f += 3) for (let k = 0; k < 3; k++) {
+      const a = map[index[f + k]], b = map[index[f + (k + 1) % 3]];
+      if (a !== b && Math.hypot(rest[a * 3] - rest[b * 3], rest[a * 3 + 1] - rest[b * 3 + 1], rest[a * 3 + 2] - rest[b * 3 + 2]) < o.minEdge) par[find(a)] = find(b);
+    }
+    const id = new Int32Array(m).fill(-1), sum: number[] = [], cnt: number[] = [];
+    for (let i = 0; i < m; i++) {
+      const r = find(i);
+      if (id[r] < 0) { id[r] = cnt.length; cnt.push(0); sum.push(0, 0, 0); }
+      const q = id[r]; cnt[q]++; sum[q * 3] += rest[i * 3]; sum[q * 3 + 1] += rest[i * 3 + 1]; sum[q * 3 + 2] += rest[i * 3 + 2];
+    }
+    for (let i = 0; i < nR; i++) map[i] = id[find(map[i])];
+    rest.length = 0;
+    for (let q = 0; q < cnt.length; q++) rest.push(sum[q * 3] / cnt[q], sum[q * 3 + 1] / cnt[q], sum[q * 3 + 2] / cnt[q]);
+  }
+  const n = rest.length / 3;
+  const X0 = new Float64Array(rest), x = new Float64Array(rest), xp = new Float64Array(rest), v = new Float64Array(n * 3);
+  const faces: number[] = [];
+  for (let f = 0; f < index.length; f += 3) {
+    const a = map[index[f]], b = map[index[f + 1]], c = map[index[f + 2]];
+    if (a !== b && b !== c && a !== c) faces.push(a, b, c);
+  }
+  const F = new Uint32Array(faces), nF = F.length / 3;
+
+  // ---- edges, bend pairs, rim ----
+  const edge = new Map<number, [number, number, number, number]>();   // key -> [i, j, opposite vertex of first face, of second face]
+  for (let f = 0; f < nF; f++) for (let k = 0; k < 3; k++) {
+    const a = F[f * 3 + k], b = F[f * 3 + (k + 1) % 3], c = F[f * 3 + (k + 2) % 3];
+    const key = a < b ? a * 1e7 + b : b * 1e7 + a;
+    const e = edge.get(key);
+    if (e) e[3] = c; else edge.set(key, [a, b, c, -1]);
+  }
+  const dist0 = (i: number, j: number) => Math.hypot(X0[i * 3] - X0[j * 3], X0[i * 3 + 1] - X0[j * 3 + 1], X0[i * 3 + 2] - X0[j * 3 + 2]);
+  const cs: number[] = [], cb: number[] = [], cd: number[] = [], cth: number[] = [];
+  let topY = -Infinity;
+  for (let i = 0; i < n; i++) topY = Math.max(topY, X0[i * 3 + 1]);
+  const midY = (topY + Math.min(...Array.from({ length: n }, (_, i) => X0[i * 3 + 1]))) / 2;
+  const w = new Float64Array(n).fill(1);
+  const hemY = midY - (topY - midY) * 0.6;
+  const botY = 2 * midY - topY, rimTop: number[] = [];
+  let rimLow = topY;
+  for (const [a, b, c, d] of edge.values()) {
+    cs.push(a, b);
+    if (d >= 0) {
+      const th = foldAngle(X0, a, b, c, d);
+      if (Math.abs(th) > o.creaseAngle) { cd.push(a, b, c, d); cth.push(th); } else cb.push(c, d);
+    } else if (!free && X0[a * 3 + 1] > topY - 0.15 * (topY - botY) && X0[b * 3 + 1] > topY - 0.15 * (topY - botY)) { w[a] = 0; w[b] = 0; rimTop.push(X0[a * 3 + 1], X0[b * 3 + 1]); }
+  }
+  // What is held to the waist: the open rim at the top, and everything above `pinY`. Normally that is a narrow band
+  // under the top; when the top is a waistband folded over (its open rim sits lower, inside), the whole band.
+  const anchors: number[] = [];   // the points held at the waist: what the rest of the cloth is tethered to
+  rimTop.sort((a, b) => a - b);
+  const pinY = rimTop.length ? Math.min(topY - o.pinBelowTop, rimTop[rimTop.length >> 1] - 0.002) : topY - Math.max(o.pinBelowTop, 0.04 * (topY - botY));
+  rimLow = pinY;
+  if (free) { for (let i = 0; i < nR; i++) if (free[i] < 0.5) w[map[i]] = 0; }
+  else for (let i = 0; i < n; i++) if (X0[i * 3 + 1] > pinY) w[i] = 0;
+  {   // a piece with nothing held (a stray fragment of the mesh) rides with the waist instead of falling
+    const par = Int32Array.from({ length: n }, (_, i) => i);
+    const find = (a: number): number => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+    for (let k = 0; k < cs.length; k += 2) par[find(cs[k])] = find(cs[k + 1]);
+    const held = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (!w[i]) { held[find(i)] = 1; anchors.push(i); }
+    for (let i = 0; i < n; i++) if (!held[find(i)]) w[i] = 0;
+  }
+  const pinned: number[] = []; for (let i = 0; i < n; i++) if (!w[i]) pinned.push(i);
+  const CS = new Uint32Array(cs), LS = new Float64Array(cs.length / 2), CB = new Uint32Array(cb), LB = new Float64Array(cb.length / 2);
+  for (let k = 0; k < LS.length; k++) LS[k] = dist0(CS[k * 2], CS[k * 2 + 1]);
+  for (let k = 0; k < LB.length; k++) LB[k] = dist0(CB[k * 2], CB[k * 2 + 1]);
+  const CD = new Uint32Array(cd), TH = new Float64Array(cth);
+  // ---- long distances: each point keeps its distance to a few points 5-9cm away, softly. Edge-to-edge bending alone
+  // only carries stiffness a couple of centimetres per pass, so the flare of the pleated cone sags under its weight;
+  // these carry it across a pleat. They tie cloth to cloth, never to the body, so a lifted skirt still falls freely.
+  const cl: number[] = [];
+  {
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const count = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const cand: number[] = [];
+      if (!(o.shapePer > 0)) break;
+      const lo = o.shapeMin ** 2, hi = o.shapeMax ** 2, ax = X0[i * 3], ay = X0[i * 3 + 1], az = X0[i * 3 + 2];
+      for (let j = 0; j < n; j++) {
+        const dx = X0[j * 3] - ax, dy = X0[j * 3 + 1] - ay, dz = X0[j * 3 + 2] - az, d = dx * dx + dy * dy + dz * dz;
+        if (d >= lo && d <= hi) cand.push(j);
+      }
+      for (let t = 0; t < 40 && count[i] < o.shapePer && cand.length; t++) {
+        const j = cand[(rnd() * cand.length) | 0];
+        if (count[j] >= o.shapePer + 2) continue;
+        cl.push(i, j); count[i]++; count[j]++;
+      }
+    }
+  }
+  const CL = new Uint32Array(cl), LL = new Float64Array(cl.length / 2);
+  for (let k = 0; k < LL.length; k++) LL[k] = dist0(CL[k * 2], CL[k * 2 + 1]);
+  // ---- tether to the nearest pinned point ----
+  const tPin = new Int32Array(n).fill(-1), tLen = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!w[i]) continue;
+    let best = Infinity;
+    for (const p of anchors) { const d = dist0(i, p); if (d < best) { best = d; tPin[i] = p; } }
+    tLen[i] = best * o.tetherSlack;
+  }
+  // ---- how deep each point sits in the body at rest: it is not pushed further out than that ----
+  const cols = (colliders ?? (sdf ? [{ sdf }] : [])).map((c) => {
+    const col = { sdf: c.sdf, M: I12(), prev: I12(), cur: I12(), last: I12(), inv: I12(), margin: new Float64Array(n) };
+    if (c.rest) col.M.set(c.rest);
+    col.prev.set(col.M); col.cur.set(col.M); col.last.set(col.M); inv12(col.M, col.inv);
+    const m = col.inv;
+    for (let i = 0; i < n; i++) {
+      const px = X0[i * 3], py = X0[i * 3 + 1], pz = X0[i * 3 + 2];
+      col.margin[i] = Math.min(o.margin, col.sdf.sample(m[0] * px + m[1] * py + m[2] * pz + m[3], m[4] * px + m[5] * py + m[6] * pz + m[7], m[8] * px + m[9] * py + m[10] * pz + m[11]) - 0.0005);
+    }
+    return col;
+  });
+  const ref = { M: I12(), prev: I12(), cur: I12(), inv: I12() };
+  const pinTarget = new Float64Array(X0), pinPrev = new Float64Array(X0);
+  const frames = { ref, colliders: cols, pinTarget };
+
+  const nrm = new Float64Array(n * 3);
+  function normals() {
+    nrm.fill(0);
+    for (let f = 0; f < nF; f++) {
+      const a = F[f * 3] * 3, b = F[f * 3 + 1] * 3, c = F[f * 3 + 2] * 3;
+      const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
+      const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      nrm[a] += nx; nrm[a + 1] += ny; nrm[a + 2] += nz; nrm[b] += nx; nrm[b + 1] += ny; nrm[b + 2] += nz; nrm[c] += nx; nrm[c + 1] += ny; nrm[c + 2] += nz;
+    }
+    for (let i = 0; i < n * 3; i += 3) {
+      const l = Math.sqrt(nrm[i] * nrm[i] + nrm[i + 1] * nrm[i + 1] + nrm[i + 2] * nrm[i + 2]) || 1;
+      nrm[i] /= l; nrm[i + 1] /= l; nrm[i + 2] /= l;
+    }
+  }
+  normals();
+
+  // ---- air ----
+  let outSign = 0;   // +1 when the triangles' normals point away from the body
+  for (let f = 0; f < nF; f++) {
+    const a = F[f * 3] * 3, b = F[f * 3 + 1] * 3, c = F[f * 3 + 2] * 3;
+    const ux = X0[b] - X0[a], uy = X0[b + 1] - X0[a + 1], uz = X0[b + 2] - X0[a + 2];
+    const vx = X0[c] - X0[a], vy = X0[c + 1] - X0[a + 1], vz = X0[c + 2] - X0[a + 2];
+    outSign += (uy * vz - uz * vy) * ((X0[a] + X0[b] + X0[c]) / 3 - pivot[0]) + (ux * vy - uy * vx) * ((X0[a + 2] + X0[b + 2] + X0[c + 2]) / 3 - pivot[1]);
+  }
+  outSign = outSign >= 0 ? 1 : -1;
+  const aero = new Float64Array(n * 3), aeroW = new Float64Array(n);
+  let clock = 0;
+  function computeAero(dt: number): void {
+    clock += dt;
+    aero.fill(0); aeroW.fill(0);
+    const wl = Math.hypot(wind[0], wind[1], wind[2]), wx = wl ? wind[0] / wl : 0, wy = wl ? wind[1] / wl : 0, wz = wl ? wind[2] / wl : 0;
+    // air entering the hem from below: the wind's rise against how fast the waist is dropping
+    const up = Math.max(0, wind[1] - ((ref.M[4] - ref.prev[4]) * pivot[0] + (ref.M[5] - ref.prev[5]) * topY + (ref.M[6] - ref.prev[6]) * pivot[1] + ref.M[7] - ref.prev[7]) / dt);
+    const fill = o.inflate * up * up * outSign;
+    for (let f = 0; f < nF; f++) {
+      const i = F[f * 3], j = F[f * 3 + 1], l = F[f * 3 + 2], a = i * 3, b = j * 3, c = l * 3;
+      const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2];
+      const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const A2 = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (A2 < 1e-12) continue;
+      nx /= A2; ny /= A2; nz /= A2;
+      // the wind here: weaker where it would have to come through the body, and uneven in space and time
+      const inner = (nx * wx + ny * wy + nz * wz) * outSign > 0;
+      const k = (inner ? o.shield : 1) * (1 + o.gust * Math.sin(9 * x[a] + 6 * x[a + 1] + 7 * x[a + 2] + 11 * clock) * Math.sin(5 * x[a + 2] - 7 * clock));
+      const rx = (v[a] + v[b] + v[c]) / 3 - wind[0] * k, ry = (v[a + 1] + v[b + 1] + v[c + 1]) / 3 - wind[1] * k, rz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3 - wind[2] * k;
+      const vn = rx * nx + ry * ny + rz * nz;
+      const m = (-o.drag * Math.abs(vn) * vn + fill) * A2;
+      const fx = nx * m, fy = ny * m, fz = nz * m;
+      aero[a] += fx; aero[a + 1] += fy; aero[a + 2] += fz; aero[b] += fx; aero[b + 1] += fy; aero[b + 2] += fz; aero[c] += fx; aero[c + 1] += fy; aero[c + 2] += fz;
+      aeroW[i] += A2; aeroW[j] += A2; aeroW[l] += A2;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!aeroW[i]) continue;
+      const k = i * 3, q = 1 / aeroW[i];
+      let ax = aero[k] * q, ay = aero[k + 1] * q, az = aero[k + 2] * q;
+      const l = Math.sqrt(ax * ax + ay * ay + az * az);
+      if (l > o.maxAero) { const r = o.maxAero / l; ax *= r; ay *= r; az *= r; }
+      aero[k] = ax; aero[k + 1] = ay; aero[k + 2] = az;
+    }
+  }
+
+  // ---- body pose ----
+  const body = { x: 0, y: 0, z: 0, yaw: 0 }, bodyPrev = { x: 0, y: 0, z: 0, yaw: 0 };
+  const g: number[] = [0, 0, 0];
+  let driven = false;
+  // without a driver: one rigid body, the held points and every collider ride on it
+  function followBody() {
+    const c = Math.cos(body.yaw), s = Math.sin(body.yaw), m = ref.M;
+    m[0] = c; m[1] = 0; m[2] = s; m[3] = pivot[0] + body.x - c * pivot[0] - s * pivot[1];
+    m[4] = 0; m[5] = 1; m[6] = 0; m[7] = body.y;
+    m[8] = -s; m[9] = 0; m[10] = c; m[11] = pivot[1] + body.z + s * pivot[0] - c * pivot[1];
+    for (const col of cols) col.M.set(m);
+    for (const i of pinned) {
+      const k = i * 3, px = X0[k], py = X0[k + 1], pz = X0[k + 2];
+      pinTarget[k] = m[0] * px + m[1] * py + m[2] * pz + m[3]; pinTarget[k + 1] = m[4] * px + m[5] * py + m[6] * pz + m[7]; pinTarget[k + 2] = m[8] * px + m[9] * py + m[10] * pz + m[11];
+    }
+  }
+  // make "now" the start of the next step too (after a jump in the pose, so nothing is swept across the gap)
+  function snapFrames() {
+    ref.prev.set(ref.M);
+    for (const col of cols) { col.prev.set(col.M); col.cur.set(col.M); col.last.set(col.M); }
+    pinPrev.set(pinTarget);
+    for (const i of pinned) { const k = i * 3; x[k] = pinTarget[k]; x[k + 1] = pinTarget[k + 1]; x[k + 2] = pinTarget[k + 2]; }
+  }
+
+  // ---- grab ----
+  let grab: Grab | null = null;   // { ids, off, centre, target:[x,y,z], prev:[x,y,z] }
+  function startGrab(px: number, py: number, pz: number): boolean {
+    const ids: number[] = [], off: number[] = [];
+    let centre = -1, best = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (!w[i]) continue;
+      const dx = x[i * 3] - px, dy = x[i * 3 + 1] - py, dz = x[i * 3 + 2] - pz, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d < best) { best = d; centre = i; }
+      if (d < o.grabRadius) { ids.push(i); off.push(dx, dy, dz); }
+    }
+    if (centre < 0) return false;
+    if (!ids.includes(centre)) { ids.push(centre); off.push(x[centre * 3] - px, x[centre * 3 + 1] - py, x[centre * 3 + 2] - pz); }
+    for (const i of ids) w[i] = 0;
+    grab = { ids, off, centre, target: [px, py, pz], prev: [px, py, pz] };
+    return true;
+  }
+  function moveGrab(px: number, py: number, pz: number): void { if (grab) grab.target = [px, py, pz]; }
+  function endGrab() { if (grab) { for (const i of grab.ids) w[i] = 1; grab = null; } }
+  // the pinch is knocked away: let go, and send the cloth that was held off at this velocity
+  function knock(vx: number, vy: number, vz: number): void {
+    if (!grab) return;
+    const ids = grab.ids;
+    endGrab();
+    for (const i of ids) { v[i * 3] = vx; v[i * 3 + 1] = vy; v[i * 3 + 2] = vz; }
+  }
+
+  const wind: number[] = [0, 0, 0];
+  const stats = { ms: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
+
+  function solve(C: Uint32Array, L: Float64Array, alpha: number): void {
+    for (let q = 0; q < L.length; q++) {
+      const i = C[q * 2], j = C[q * 2 + 1], wi = w[i], wj = w[j], ws = wi + wj;
+      if (!ws) continue;
+      const ki = i * 3, kj = j * 3, dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2];
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (l < 1e-9) continue;
+      const lam = (l - L[q]) / ((ws + alpha) * l);
+      x[ki] += dx * lam * wi; x[ki + 1] += dy * lam * wi; x[ki + 2] += dz * lam * wi;
+      x[kj] -= dx * lam * wj; x[kj + 1] -= dy * lam * wj; x[kj + 2] -= dz * lam * wj;
+    }
+  }
+
+  // fold angles: keep the signed angle across each crease
+  function solveCreases(alpha: number): void {
+    for (let q = 0; q < TH.length; q++) {
+      const i3 = CD[q * 4], i4 = CD[q * 4 + 1], i1 = CD[q * 4 + 2], i2 = CD[q * 4 + 3];
+      const w1 = w[i1], w2 = w[i2], w3 = w[i3], w4 = w[i4];
+      if (!(w1 + w2 + w3 + w4)) continue;
+      const k1 = i1 * 3, k2 = i2 * 3, k3 = i3 * 3, k4 = i4 * 3;
+      const ex = x[k4] - x[k3], ey = x[k4 + 1] - x[k3 + 1], ez = x[k4 + 2] - x[k3 + 2];
+      const ax = x[k1] - x[k3], ay = x[k1 + 1] - x[k3 + 1], az = x[k1 + 2] - x[k3 + 2];   // wing 1 from the edge's ends
+      const bx = x[k1] - x[k4], by = x[k1 + 1] - x[k4 + 1], bz = x[k1 + 2] - x[k4 + 2];
+      const cx = x[k2] - x[k4], cy = x[k2 + 1] - x[k4 + 1], cz = x[k2 + 2] - x[k4 + 2];   // wing 2
+      const dx = x[k2] - x[k3], dy = x[k2 + 1] - x[k3 + 1], dz = x[k2 + 2] - x[k3 + 2];
+      const n1x = ay * bz - az * by, n1y = az * bx - ax * bz, n1z = ax * by - ay * bx;
+      const n2x = cy * dz - cz * dy, n2y = cz * dx - cx * dz, n2z = cx * dy - cy * dx;
+      const s1 = n1x * n1x + n1y * n1y + n1z * n1z, s2 = n2x * n2x + n2y * n2y + n2z * n2z, el = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (s1 < 1e-16 || s2 < 1e-16 || el < 1e-9) continue;
+      const cos = n1x * n2x + n1y * n2y + n1z * n2z;
+      const sin = ((n1y * n2z - n1z * n2y) * ex + (n1z * n2x - n1x * n2z) * ey + (n1x * n2y - n1y * n2x) * ez) / el;
+      let C = Math.atan2(sin, cos) - TH[q];
+      if (C > Math.PI) C -= 2 * Math.PI; else if (C < -Math.PI) C += 2 * Math.PI;
+      // gradient of the angle (Bridson et al. 2003, "Simulation of clothing with folds and wrinkles")
+      const f1 = el / s1, f2 = el / s2;
+      const g3a = (bx * ex + by * ey + bz * ez) / (el * s1), g3b = (cx * ex + cy * ey + cz * ez) / (el * s2);
+      const g4a = -(ax * ex + ay * ey + az * ez) / (el * s1), g4b = -(dx * ex + dy * ey + dz * ez) / (el * s2);
+      const u1x = f1 * n1x, u1y = f1 * n1y, u1z = f1 * n1z, u2x = f2 * n2x, u2y = f2 * n2y, u2z = f2 * n2z;
+      const u3x = g3a * n1x + g3b * n2x, u3y = g3a * n1y + g3b * n2y, u3z = g3a * n1z + g3b * n2z;
+      const u4x = g4a * n1x + g4b * n2x, u4y = g4a * n1y + g4b * n2y, u4z = g4a * n1z + g4b * n2z;
+      const den = w1 * (u1x * u1x + u1y * u1y + u1z * u1z) + w2 * (u2x * u2x + u2y * u2y + u2z * u2z)
+        + w3 * (u3x * u3x + u3y * u3y + u3z * u3z) + w4 * (u4x * u4x + u4y * u4y + u4z * u4z) + alpha;
+      const lam = -GRAD_SIGN * C / den;
+      x[k1] += lam * w1 * u1x; x[k1 + 1] += lam * w1 * u1y; x[k1 + 2] += lam * w1 * u1z;
+      x[k2] += lam * w2 * u2x; x[k2 + 1] += lam * w2 * u2y; x[k2 + 2] += lam * w2 * u2z;
+      x[k3] += lam * w3 * u3x; x[k3 + 1] += lam * w3 * u3y; x[k3 + 2] += lam * w3 * u3z;
+      x[k4] += lam * w4 * u4x; x[k4 + 1] += lam * w4 * u4y; x[k4 + 2] += lam * w4 * u4z;
+    }
+  }
+
+  // ---- cloth against cloth: point pairs from a hash grid, refreshed a few times a frame ----
+  const TS = 2 * n + 1, cellStart = new Int32Array(TS + 1), cellItem = new Int32Array(n), cellOf = new Int32Array(n);
+  let pairs = new Int32Array(1 << 16), pairMin = new Float32Array(1 << 15), nPairs = 0;
+  // the forward half of the 27 neighbouring cells: each pair of cells is visited once
+  const HALF: number[] = [];
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) if (a > 0 || (a === 0 && (b > 0 || (b === 0 && c > 0)))) HALF.push(a, b, c);
+  const xr = new Float64Array(n * 3);   // where the points were when the pairs were last found
+  let pairsValid = false, rebuildsThisFrame = 0;
+  function pairsStale() {
+    if (!pairsValid) return true;
+    if (rebuildsThisFrame >= o.maxRebuilds) return false;
+    // measured in the body's frame: a spin or a jump carries the whole skirt along without changing who is near whom
+    const lim = (o.pairSlack / 2) ** 2;
+    const m = ref.inv;
+    for (let k = 0; k < n * 3; k += 3) {
+      const px = x[k], py = x[k + 1], pz = x[k + 2];
+      const dx = m[0] * px + m[1] * py + m[2] * pz + m[3] - xr[k], dy = m[4] * px + m[5] * py + m[6] * pz + m[7] - xr[k + 1], dz = m[8] * px + m[9] * py + m[10] * pz + m[11] - xr[k + 2];
+      if (dx * dx + dy * dy + dz * dz > lim) return true;
+    }
+    return false;
+  }
+  function findPairs() {
+    const m = ref.inv;
+    for (let k = 0; k < n * 3; k += 3) {
+      const px = x[k], py = x[k + 1], pz = x[k + 2];
+      xr[k] = m[0] * px + m[1] * py + m[2] * pz + m[3]; xr[k + 1] = m[4] * px + m[5] * py + m[6] * pz + m[7]; xr[k + 2] = m[8] * px + m[9] * py + m[10] * pz + m[11];
+    }
+    pairsValid = true; stats.rebuilds++; rebuildsThisFrame++;
+    const r = o.thickness + o.pairSlack, inv = 1 / r, r2 = r * r;
+    cellStart.fill(0);
+    for (let i = 0; i < n; i++) {
+      const h = (Math.imul(Math.floor(x[i * 3] * inv), 92837111) ^ Math.imul(Math.floor(x[i * 3 + 1] * inv), 689287499) ^ Math.imul(Math.floor(x[i * 3 + 2] * inv), 283923481)) >>> 0;
+      cellOf[i] = h % TS; cellStart[cellOf[i]]++;
+    }
+    let acc = 0;
+    for (let c = 0; c < TS; c++) { acc += cellStart[c]; cellStart[c] = acc; }
+    cellStart[TS] = acc;
+    for (let i = 0; i < n; i++) cellItem[--cellStart[cellOf[i]]] = i;
+    nPairs = 0;
+    const add = (i: number, j: number) => {
+      const ki = i * 3, kj = j * 3;
+      const dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2];
+      if (dx * dx + dy * dy + dz * dz >= r2 || !(w[i] + w[j])) return;
+      const rx = X0[kj] - X0[ki], ry = X0[kj + 1] - X0[ki + 1], rz = X0[kj + 2] - X0[ki + 2];
+      if (nPairs * 2 >= pairs.length) {
+        const p2 = new Int32Array(pairs.length * 2); p2.set(pairs); pairs = p2;
+        const m2 = new Float32Array(pairMin.length * 2); m2.set(pairMin); pairMin = m2;
+      }
+      pairs[nPairs * 2] = i; pairs[nPairs * 2 + 1] = j;
+      pairMin[nPairs++] = Math.min(o.thickness, 0.8 * Math.sqrt(rx * rx + ry * ry + rz * rz));
+    };
+    for (let i = 0; i < n; i++) {
+      const cx = Math.floor(x[i * 3] * inv), cy = Math.floor(x[i * 3 + 1] * inv), cz = Math.floor(x[i * 3 + 2] * inv);
+      const own = cellOf[i];
+      for (let e = cellStart[own], end = cellStart[own + 1]; e < end; e++) { const j = cellItem[e]; if (j > i) add(i, j); }
+      for (let q = 0; q < HALF.length; q += 3) {
+        const h = ((Math.imul(cx + HALF[q], 92837111) ^ Math.imul(cy + HALF[q + 1], 689287499) ^ Math.imul(cz + HALF[q + 2], 283923481)) >>> 0) % TS;
+        if (h === own) continue;   // two cells in one bucket: already covered above
+        for (let e = cellStart[h], end = cellStart[h + 1]; e < end; e++) add(i, cellItem[e]);
+      }
+    }
+  }
+  function solveSelf() {
+    const fr = o.selfFriction;
+    for (let q = 0; q < nPairs; q++) {
+      const i = pairs[q * 2], j = pairs[q * 2 + 1], ki = i * 3, kj = j * 3, m = pairMin[q];
+      const dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2], d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= m * m || d2 < 1e-18) continue;
+      const wi = w[i], wj = w[j], ws = wi + wj;
+      if (!ws) continue;
+      const d = Math.sqrt(d2), c = (m - d) / (d * ws);
+      x[ki] -= dx * c * wi; x[ki + 1] -= dy * c * wi; x[ki + 2] -= dz * c * wi;
+      x[kj] += dx * c * wj; x[kj + 1] += dy * c * wj; x[kj + 2] += dz * c * wj;
+      // touching layers drag each other: move both part of the way to their shared travel this substep
+      for (let a = 0; a < 3; a++) {
+        const vi = x[ki + a] - xp[ki + a], vj = x[kj + a] - xp[kj + a], av = (vi * wj + vj * wi) / ws;
+        x[ki + a] += (av - vi) * fr * (wi ? 1 : 0); x[kj + a] += (av - vj) * fr * (wj ? 1 : 0);
+      }
+    }
+  }
+
+  function step(dt: number): void {
+    const t0 = performance.now();
+    const ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), aB = o.bend / (h * h), aL = o.shape / (h * h), aC = o.crease / (h * h);
+    const vmax = o.maxSpeed;
+    rebuildsThisFrame = 0;
+    if (!driven) followBody();
+    computeAero(dt);
+    const damp = Math.max(0, 1 - o.damping * h), air = Math.min(0.9, o.air * h);
+    const gFrom = grab ? grab.prev.slice() : null;
+    for (let s = 0; s < ns; s++) {
+      const a = (s + 1) / ns;
+      lerp12(ref.prev, ref.M, a, ref.cur); inv12(ref.cur, ref.inv);
+      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); lerp12(col.prev, col.M, a, col.cur); inv12(col.cur, col.inv); }
+      // predict
+      for (let i = 0; i < n; i++) {
+        const k = i * 3;
+        xp[k] = x[k]; xp[k + 1] = x[k + 1]; xp[k + 2] = x[k + 2];
+        if (!w[i]) continue;
+        const rel = ((v[k] - wind[0]) * nrm[k] + (v[k + 1] - wind[1]) * nrm[k + 1] + (v[k + 2] - wind[2]) * nrm[k + 2]) * air;
+        v[k] += aero[k] * h - rel * nrm[k]; v[k + 1] += (o.gravity + aero[k + 1]) * h - rel * nrm[k + 1]; v[k + 2] += aero[k + 2] * h - rel * nrm[k + 2];
+        const sp = Math.sqrt(v[k] * v[k] + v[k + 1] * v[k + 1] + v[k + 2] * v[k + 2]);
+        if (sp > vmax) { const r = vmax / sp; v[k] *= r; v[k + 1] *= r; v[k + 2] *= r; }
+        x[k] += v[k] * h; x[k + 1] += v[k + 1] * h; x[k + 2] += v[k + 2] * h;
+      }
+      // pinned waist follows the body
+      for (const i of pinned) {
+        const k = i * 3;
+        x[k] = pinPrev[k] + (pinTarget[k] - pinPrev[k]) * a; x[k + 1] = pinPrev[k + 1] + (pinTarget[k + 1] - pinPrev[k + 1]) * a; x[k + 2] = pinPrev[k + 2] + (pinTarget[k + 2] - pinPrev[k + 2]) * a;
+      }
+      // fingers
+      if (grab && gFrom) {
+        let tx = gFrom[0] + (grab.target[0] - gFrom[0]) * a, ty = gFrom[1] + (grab.target[1] - gFrom[1]) * a, tz = gFrom[2] + (grab.target[2] - gFrom[2]) * a;
+        // the cloth cannot be pulled further from the waist than it is long
+        const c = grab.centre, p = tPin[c] * 3, ci = grab.ids.indexOf(c) * 3;
+        let dx = tx + grab.off[ci] - x[p], dy = ty + grab.off[ci + 1] - x[p + 1], dz = tz + grab.off[ci + 2] - x[p + 2];
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > tLen[c]) { const r = tLen[c] / d - 1; tx += dx * r; ty += dy * r; tz += dz * r; }
+        for (let q = 0; q < grab.ids.length; q++) {
+          const k = grab.ids[q] * 3;
+          x[k] = tx + grab.off[q * 3]; x[k + 1] = ty + grab.off[q * 3 + 1]; x[k + 2] = tz + grab.off[q * 3 + 2];
+        }
+        if (s === ns - 1) grab.prev = [tx, ty, tz];
+      }
+      if (LL.length && s % o.shapeEvery === 0) solve(CL, LL, aL / (o.shapeEvery * o.shapeEvery));
+      solve(CB, LB, aB); solveCreases(aC); solve(CS, LS, aS);   // stretch last: it has the final say
+      if (o.thickness > 0) {
+        if (s % o.selfEvery === 0) { if (pairsStale()) findPairs(); solveSelf(); }
+      }
+      // tether and body
+      for (let i = 0; i < n; i++) {
+        if (!w[i]) continue;
+        const k = i * 3, p = tPin[i] * 3;
+        let dx = x[k] - x[p], dy = x[k + 1] - x[p + 1], dz = x[k + 2] - x[p + 2];
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > tLen[i]) { const r = tLen[i] / d; x[k] = x[p] + dx * r; x[k + 1] = x[p + 1] + dy * r; x[k + 2] = x[p + 2] + dz * r; }
+        for (let q = 0; q < cols.length; q++) {
+          const col = cols[q], m = col.inv, px = x[k], py = x[k + 1], pz = x[k + 2];
+          // into the piece's own space
+          const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
+          if (col.sdf.sample(lx, ly, lz) >= col.margin[i]) continue;
+          const sd = col.sdf.sample(lx, ly, lz, g), c = col.cur;
+          let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
+          const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
+          gx /= gl; gy /= gl; gz /= gl;
+          const push = col.margin[i] - sd;
+          x[k] += gx * push; x[k + 1] += gy * push; x[k + 2] += gz * push;
+          // friction: lose part of the slide along the surface, measured against where the piece carried this spot from
+          const l = col.last;
+          const bx = l[0] * lx + l[1] * ly + l[2] * lz + l[3], by = l[4] * lx + l[5] * ly + l[6] * lz + l[7], bz = l[8] * lx + l[9] * ly + l[10] * lz + l[11];
+          const sx = (x[k] - xp[k]) - (px - bx), sy = (x[k + 1] - xp[k + 1]) - (py - by), sz = (x[k + 2] - xp[k + 2]) - (pz - bz);
+          const sn = sx * gx + sy * gy + sz * gz, fr = o.friction;
+          x[k] -= (sx - sn * gx) * fr; x[k + 1] -= (sy - sn * gy) * fr; x[k + 2] -= (sz - sn * gz) * fr;
+        }
+      }
+      // velocities
+      const ih = 1 / h;
+      for (let i = 0; i < n * 3; i++) v[i] = (x[i] - xp[i]) * ih * damp;
+    }
+    ref.prev.set(ref.M);
+    for (const col of cols) col.prev.set(col.M);
+    for (const i of pinned) { const k = i * 3; pinPrev[k] = pinTarget[k]; pinPrev[k + 1] = pinTarget[k + 1]; pinPrev[k + 2] = pinTarget[k + 2]; }
+    normals();
+    stats.ms += (performance.now() - t0 - stats.ms) * 0.1;
+  }
+
+  // numbers for tuning: worst edge stretch, deepest point inside the body (beyond what it had at rest), fastest point
+  function measure() {
+    let strain = 0, depth = 0, speed = 0, over = 0, worst = -1;
+    for (let q = 0; q < LS.length; q++) {
+      const i = CS[q * 2] * 3, j = CS[q * 2 + 1] * 3;
+      const e = Math.hypot(x[j] - x[i], x[j + 1] - x[i + 1], x[j + 2] - x[i + 2]) / LS[q] - 1;
+      if (e > strain) { strain = e; worst = q; }
+      if (e > 0.05) over++;
+    }
+    let touch = 0;
+    if (o.thickness > 0) {
+      inv12(ref.M, ref.inv); findPairs(); stats.rebuilds--;
+      for (let q = 0; q < nPairs; q++) {
+        const i = pairs[q * 2] * 3, j = pairs[q * 2 + 1] * 3;
+        if (Math.hypot(x[j] - x[i], x[j + 1] - x[i + 1], x[j + 2] - x[i + 2]) < 0.6 * pairMin[q]) touch++;
+      }
+    }
+    stats.through = touch;   // point pairs closer than 60% of their allowed distance
+    stats.pairs = nPairs;
+    stats.over = over / LS.length;   // share of edges stretched more than 5%
+    stats.worst = worst < 0 ? null : { rest: LS[worst], y: X0[CS[worst * 2] * 3 + 1], w: [w[CS[worst * 2]], w[CS[worst * 2 + 1]]] };
+    for (const col of cols) {
+      inv12(col.M, col.inv);
+      const m = col.inv;
+      for (let i = 0; i < n; i++) {
+        if (!w[i]) continue;
+        const px = x[i * 3], py = x[i * 3 + 1], pz = x[i * 3 + 2];
+        depth = Math.max(depth, col.margin[i] - col.sdf.sample(m[0] * px + m[1] * py + m[2] * pz + m[3], m[4] * px + m[5] * py + m[6] * pz + m[7], m[8] * px + m[9] * py + m[10] * pz + m[11]));
+      }
+    }
+    for (let k = 0; k < n * 3; k += 3) speed = Math.max(speed, Math.hypot(v[k], v[k + 1], v[k + 2]));
+    // against the rest shape, in the body's frame
+    let dev = 0, devMax = 0, r0 = 0, r1 = 0, nh = 0;
+    inv12(ref.M, ref.inv);
+    const m = ref.inv;
+    for (let i = 0; i < n; i++) {
+      const k = i * 3, px = x[k], py = x[k + 1], pz = x[k + 2];
+      const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
+      const d = Math.hypot(lx - X0[k], ly - X0[k + 1], lz - X0[k + 2]);
+      dev += d; devMax = Math.max(devMax, d);
+      if (X0[k + 1] < hemY) { r0 += Math.hypot(X0[k] - pivot[0], X0[k + 2] - pivot[1]); r1 += Math.hypot(lx - pivot[0], lz - pivot[1]); nh++; }
+    }
+    stats.dev = dev / n; stats.devMax = devMax; stats.flare = r1 / r0;   // flare: hem radius against the rest shape's
+    stats.strain = strain; stats.depth = depth; stats.speed = speed;
+    return stats;
+  }
+
+  // The model's shape is how the skirt already hangs under gravity. Simulated from it, the cloth sags further (a long
+  // skirt's hem narrowed to 87% of the model's). So the shape the soft constraints (long distances, bend, creases)
+  // remember is moved the other way: let the cloth settle in the pose it was given in, measure how far each point
+  // sagged, shift the remembered shape by that much against the sag, repeat. Edge lengths are left alone (cloth does
+  // not stretch). Call once after creation, with the frames still at the given pose.
+  function fitRestToGravity(iterations = 2, frames = 60, gain = 0.9): void {
+    const target = new Float64Array(X0), wasDriven = driven;
+    const dist = (i: number, j: number) => Math.hypot(target[i * 3] - target[j * 3], target[i * 3 + 1] - target[j * 3 + 1], target[i * 3 + 2] - target[j * 3 + 2]);
+    driven = true;
+    const calm = () => { pairsValid = false; x.set(X0); xp.set(X0); v.fill(0); snapFrames(); normals(); };
+    for (let it = 0; it < iterations; it++) {
+      calm();
+      for (let f = 0; f < frames; f++) step(1 / 60);
+      for (let i = 0; i < n; i++) {
+        if (!w[i]) continue;
+        for (let c = 0; c < 3; c++) target[i * 3 + c] -= (x[i * 3 + c] - X0[i * 3 + c]) * gain;
+      }
+      for (let k = 0; k < LL.length; k++) LL[k] = dist(CL[k * 2], CL[k * 2 + 1]);
+      for (let k = 0; k < LB.length; k++) LB[k] = dist(CB[k * 2], CB[k * 2 + 1]);
+      for (let k = 0; k < TH.length; k++) TH[k] = foldAngle(target, CD[k * 4], CD[k * 4 + 1], CD[k * 4 + 2], CD[k * 4 + 3]);
+    }
+    calm();
+    driven = wasDriven;
+  }
+
+  // back to the rest shape; a driver passes where the points are in the pose of the moment instead (`positions`)
+  function reset(positions: ArrayLike<number> | null = null): void {
+    pairsValid = false;
+    endGrab(); v.fill(0);
+    if (positions) x.set(positions);
+    else {
+      x.set(X0);
+      for (const b of [body, bodyPrev]) { b.x = b.y = b.z = b.yaw = 0; }
+      followBody();
+    }
+    xp.set(x);
+    snapFrames();
+    normals();
+  }
+
+  // write the points and normals to the render vertices
+  function write(posAttr: { array: ArrayLike<number> & { [i: number]: number }; needsUpdate: boolean }, nrmAttr: { array: ArrayLike<number> & { [i: number]: number }; needsUpdate: boolean }): void {
+    const P = posAttr.array, N = nrmAttr.array;
+    for (let i = 0; i < nR; i++) {
+      const k = map[i] * 3;
+      P[i * 3] = x[k]; P[i * 3 + 1] = x[k + 1]; P[i * 3 + 2] = x[k + 2];
+      N[i * 3] = nrm[k]; N[i * 3 + 1] = nrm[k + 1]; N[i * 3 + 2] = nrm[k + 2];
+    }
+    posAttr.needsUpdate = true; nrmAttr.needsUpdate = true;
+  }
+
+  return { o, n, nF, F, x, v, w, X0, nrm, map, body, bodyPrev, frames, snapFrames, fitRestToGravity, tPin,
+    get driven() { return driven; }, set driven(d) { driven = d; }, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, pinned, rimLow, pinY, topY, botY, hemY,
+    solveCreases, CD, TH,
+    knock,
+    get grabbing() { return !!grab; },
+    get grabPoint() { return grab ? grab.prev : null; },   // where the fingers are
+    // how far the pinched cloth has been raised above where it hangs at rest
+    get grabLift() { return grab ? x[grab.centre * 3 + 1] - body.y - X0[grab.centre * 3 + 1] : 0; }, counts: { points: n, stretch: LS.length, bend: LB.length, crease: TH.length, shape: LL.length, pinned: pinned.length } };
+}

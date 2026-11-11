@@ -12,6 +12,12 @@ export interface StageQuality {
   handClearance: HandClearanceMode;
   /** 手に押されてスカートがへこむ（avatar/clothDent.ts）。頂点シェーダーで行うので軽い */
   clothDent: boolean;
+  /**
+   * スカートを布として動かす（cloth/VrmSkirt.ts）。揺れものの骨の代わりに、脚をよけて垂れる布になる。
+   * CPU で 1 人あたり 1 フレーム 3〜5ms（負荷の高い PC では 12〜14ms かかり 60fps を割った）。
+   * 既定は切（確かめたモデル・モーションがまだ少ない）
+   */
+  skirtCloth: boolean;
   /** 背景ぼかし（postprocessing/DepthOfField.ts）。画面の全画素で40回ずつ読むので重い */
   depthOfField: boolean;
   /** キャラが地面に落とす影の解像度 */
@@ -32,8 +38,8 @@ export interface StageQuality {
 export type StageQualityLevel = 'high' | 'low';
 
 export const STAGE_QUALITY_PRESETS: Record<StageQualityLevel, StageQuality> = {
-  high: { handClearance: 'precise', clothDent: true, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true, rimBloom: true },
-  low: { handClearance: 'simple', clothDent: true, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false, rimBloom: false },
+  high: { handClearance: 'precise', clothDent: true, skirtCloth: false, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true, rimBloom: true },
+  low: { handClearance: 'simple', clothDent: true, skirtCloth: false, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false, rimBloom: false },
 };
 
 /** 段階の手動指定。URL の ?quality=low か、localStorage の stage_quality（検証・切り替え用） */

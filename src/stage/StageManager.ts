@@ -1138,6 +1138,7 @@ export class StageManager {
       hairShadow: this.hairShadow.uniforms,
       handClearance: this.quality.handClearance,
       clothDent: this.quality.clothDent,
+      skirtCloth: this.quality.skirtCloth,
     });
 
     await avatar.load(modelUrl);
@@ -2179,6 +2180,7 @@ export class StageManager {
     this.loadedAvatars.forEach((avatar) => {
       avatar.setHandClearance(this.quality.handClearance);
       avatar.setClothDent(this.quality.clothDent);
+      avatar.setSkirtCloth(this.quality.skirtCloth);
     });
     this.applyDepthOfField();
     this.rainGround.setSheen(this.quality.wetGroundSheen);

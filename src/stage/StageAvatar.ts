@@ -12,6 +12,7 @@ import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
+import { VrmSkirt } from '../cloth/VrmSkirt';
 import { WetDrips } from '../avatar/wetDrips';
 import { AvatarEffects } from './AvatarEffects';
 import { idleMotionUrl, resolveAssetUrl } from '../utils/path';
@@ -276,6 +277,8 @@ export interface StageAvatarOptions {
   handClearance?: HandClearanceMode;
   /** 手に押されてスカートがへこむ（既定 true） */
   clothDent?: boolean;
+  /** スカートを布として動かす（既定 false） */
+  skirtCloth?: boolean;
 }
 
 export class StageAvatar {
@@ -293,6 +296,9 @@ export class StageAvatar {
   /** 手に押されてスカートがへこむ */
   private clothDent: ClothDent | null = null;
   private clothDentEnabled: boolean;
+  /** スカートの布（cloth/VrmSkirt.ts）。布にできるスカートがない・切のときは null */
+  public skirtCloth: VrmSkirt | null = null;
+  private skirtClothEnabled: boolean;
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
   private wetDrips: WetDrips | null = null;
@@ -378,6 +384,7 @@ export class StageAvatar {
     this.hairShadow = options.hairShadow;
     this.handClearanceMode = options.handClearance ?? 'precise';
     this.clothDentEnabled = options.clothDent ?? true;
+    this.skirtClothEnabled = options.skirtCloth ?? false;
   }
 
   public async load(modelUrl: string, defaultAnimationUrl: string | null = idleMotionUrl()): Promise<VRM> {
@@ -410,6 +417,10 @@ export class StageAvatar {
 
           // 1. スムース法線の事前計算（綺麗なアニメアウトライン用）
           applySmoothNormalsToHierarchy(vrm.scene);
+
+          // 1.5 スカートの布。形を測る処理（へこみ・濡れ）の後、モーションを当てる前の姿勢で作る。
+          // スカートのジオメトリを差し替えるので、スムース法線の後
+          if (this.skirtClothEnabled) this.skirtCloth = VrmSkirt.create(vrm);
 
           // 2. メッシュのシャドウとカリング解除
           vrm.scene.traverse((obj) => {
@@ -575,6 +586,16 @@ export class StageAvatar {
   public setClothDent(enabled: boolean): void {
     this.clothDentEnabled = enabled;
     this.clothDent?.setEnabled(enabled);
+  }
+
+  /** スカートを布として動かすかを切り替える。切ると揺れものの骨で動くスカートに戻る */
+  public setSkirtCloth(enabled: boolean): void {
+    this.skirtClothEnabled = enabled;
+    if (enabled && !this.skirtCloth && this.vrm) {
+      // 布は読み込み時の姿勢（T ポーズ）の形を覚える。途中から入れるときは、今の姿勢の形が元になる
+      this.skirtCloth = VrmSkirt.create(this.vrm);
+    }
+    this.skirtCloth?.setEnabled(enabled);
   }
 
   public setMotionSpeed(speed: number): void {
@@ -818,6 +839,9 @@ export class StageAvatar {
     this.springWind?.update(delta, this.wetnessTarget > 0 ? null : this.wind);
     this.vrm.update(delta);
 
+    // 4.4 スカートの布（姿勢が決まってから。濡れた服は重いので風に揺らさない）
+    this.skirtCloth?.update(delta, this.wetnessTarget > 0 ? null : this.wind);
+
     // 4.5 手に押されてスカートがへこむ（腕と揺れものが決まってから）
     this.clothDent?.update();
 
@@ -927,6 +951,8 @@ export class StageAvatar {
     this.effects = null;
     this.wetDrips?.dispose();
     this.wetDrips = null;
+    this.skirtCloth?.dispose();
+    this.skirtCloth = null;
     if (this.vrm) {
       VRMUtils.deepDispose(this.vrm.scene);
       this.scene.remove(this.vrm.scene);

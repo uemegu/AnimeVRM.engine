@@ -1,2 +1,4 @@
 node_modules/
 dist/
+# 例で試すモーション（?motion=）は各自で置く
+examples/basic/public/animations/

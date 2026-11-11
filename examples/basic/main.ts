@@ -1,6 +1,11 @@
 /**
  * グレーの床だけの空間にアバターを1人立たせ、マウスでカメラを回せる例。VRM ファイルをドロップすると差し替える。
  * 必要な素材はモデル（public/models/aoi-school.vrm）だけで、待機モーションの FBX は使わない（腕を下ろした姿勢で立つ）
+ *
+ * URL で切り替えられるもの：
+ * - ?cloth=1        スカートを布として動かす（cloth/VrmSkirt.ts）
+ * - ?motion=<名前>  public/animations/<名前>.fbx のモーションを繰り返す（FBX は自分で置く）
+ * - ?model=<URL>    読み込む VRM（省くと public/models/aoi-school.vrm）
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -38,9 +43,13 @@ const floor: LocationVisualPreset = {
   light: { direction: { x: 1, y: 3, z: 2 }, shadow: { color: '#3c4150', opacity: 0.4, softness: 4 } },
 };
 
+const params = new URLSearchParams(location.search);
+const motion = params.get('motion') ?? undefined;
+
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const stage = new StageManager({
   canvas,
+  quality: params.get('cloth') === '1' ? { skirtCloth: true } : undefined,
   presets: { timeOfDay: { day: day as TimeOfDayPreset }, locations: { floor } },
   initialTimeOfDay: 'day',
   initialLocationId: 'floor',
@@ -52,10 +61,13 @@ resize();
 
 /** キャラを1人立たせる。同じ id で modelUrl を変えると、前のモデルを破棄して読み直す */
 function showAvatar(modelUrl: string): Promise<void> {
-  return stage.setCast([{ id: 'avatar', modelUrl, slot: 'center', expression: 'neutral', expressionWeight: 1, motionLoop: true }]);
+  return stage.setCast([{ id: 'avatar', modelUrl, slot: 'center', expression: 'neutral', expressionWeight: 1, motion, motionLoop: true }]);
 }
 
-await showAvatar('/models/aoi-school.vrm');
+// 開発中にコンソールから状態を見る用
+if (import.meta.env.DEV) (window as unknown as { stage: StageManager }).stage = stage;
+
+await showAvatar(params.get('model') ?? '/models/aoi-school.vrm');
 stage.setCameraShot('wide', 'avatar');
 
 // VRM ファイルのドロップで差し替える
@@ -88,6 +100,7 @@ setTimeout(() => {
   const controls = new OrbitControls(stage.viewCamera, canvas);
   controls.target.copy(stage.viewTarget);
   controls.enableDamping = true;
+  if (import.meta.env.DEV) (window as unknown as { controls: OrbitControls }).controls = controls;
   controls.maxPolarAngle = Math.PI * 0.49;
   controls.addEventListener('change', () => stage.setFreeCameraTarget(controls.target));
   stage.setFreeCamera(true);
