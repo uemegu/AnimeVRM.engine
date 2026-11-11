@@ -1,27 +1,24 @@
 import * as THREE from 'three';
-import type { VRM, VRMHumanBoneName } from '@pixiv/three-vrm';
-import { describeParts, pickSkirt, pickColliders } from './parts';
+import { describePart } from './parts';
 import { weld, capRims, buildSDF, type DistanceGrid } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
 
 /**
- * 動いている VRM のスカートを布にする。
+ * 骨で動くメッシュ（SkinnedMesh）の一部を布にする。VRM に限らない。
  *
- * VRM は骨で動くモデルのまま、材質（MToon・輪郭線）にも触らない。スカートの部品のジオメトリだけを差し替え、
- * 頂点を毎フレーム書き換える。
+ * モデルは骨で動くまま、材質にも触らない。布にするメッシュのジオメトリだけを差し替え、頂点を毎フレーム書き換える。
  *
- * - スカートの部品に、細かく分割した新しいジオメトリを持たせる。全頂点の重みを腰 100% にして、毎フレーム、
- *   布のワールド座標を「腰のスキニング行列の逆」に通して書き戻す。描画側のふつうのスキニングで布の位置に
+ * - メッシュに、細かく分割した新しいジオメトリを持たせる。全頂点の重みを基準の骨（reference）100% にして、毎フレーム、
+ *   布のワールド座標を「その骨のスキニング行列の逆」に通して書き戻す。描画側のふつうのスキニングで布の位置に
  *   ちょうど出るので、シェーダー・輪郭線・影のパスは変えなくてよい。
- * - どこが布でどこが体に付いたままかは、リグで決める。揺れもの（スプリングボーン）と脚の骨の重みが freeFrom 以上の
- *   頂点が布。残りは腰・背骨に付いたまま（ここで CPU スキニングして、布の縁にする）。
- * - スカートの下の体は、骨ごとの剛体に切る（腰・背骨・太もも・すね）。部品ごとに骨の座標で距離の格子を作り、
- *   骨と一緒に動かす。上げた太ももが布を押す。
+ * - どこが布でどこが体に付いたままかは、リグで決める。clothBones の骨の重みが freeFrom 以上の頂点が布。残りは
+ *   ほかの骨に付いたまま（ここで CPU スキニングして、布の縁にする）。頂点ごとに直接指定もできる（clothWeights）。
+ * - 布の下の体は、骨ごとの剛体に切る（colliders.bones）。部品ごとに骨の座標で距離の格子を作り、骨と一緒に動かす。
  *
- * 使い方：読み込み直後（モーションを当てる前の姿勢）に create。毎フレーム、姿勢が決まった後（vrm.update の後）に update。
+ * 使い方：モデルが基準の姿勢（布の形を覚えさせたい姿勢）のときに create。毎フレーム、姿勢が決まった後に update。
+ * VRM のスカートは vrm.ts の createVrmSkirt が、ここへ渡すものを VRM の決まりごとから埋める。
  */
 
-const PIECE_BONES: VRMHumanBoneName[] = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'];
 // THREE.Matrix4 (column-major 4x4) -> the solver's 3x4 row-major
 function to12(m4: THREE.Matrix4, out: Float64Array): Float64Array {
   const e = m4.elements;
@@ -31,28 +28,57 @@ function to12(m4: THREE.Matrix4, out: Float64Array): Float64Array {
   return out;
 }
 
-/** リグの重み：[骨の番号, 重み] の並び */
-type Weights = [number, number][];
-
-export interface VrmSkirtOptions {
-  /** スカートの部品（材質名）。省くと、揺れものに付いた部品のうち名前か形で選ぶ */
-  skirt?: string;
+/** 布が当たる体 */
+export interface SkinnedClothColliders {
+  /** 体のメッシュ（リグ付き）。布と別のメッシュ */
+  meshes: THREE.SkinnedMesh[];
   /**
-   * 頂点が布になるのに要る、揺れものの骨の重みの割合。小さいほど布の範囲が広い（上げた太ももをよけられる）。
+   * 体を切り分ける骨。三角形は、重みがいちばん大きい骨の部品になる。ここにない骨は、親をたどって最初に当たる
+   * この中の骨に属する（ねじり骨など）
+   */
+  bones: THREE.Object3D[];
+  /** たどる途中でこの骨に当たったら、どの部品にも入れない（人体なら胸・腕・足など、布が届かない部位の骨） */
+  stopBones?: Iterable<THREE.Object3D>;
+}
+
+export interface SkinnedClothOptions {
+  /** 布にするメッシュ。ジオメトリを差し替える（setEnabled(false)・dispose で戻る） */
+  mesh: THREE.SkinnedMesh;
+  /**
+   * 布にする骨。この骨に付いた重みが freeFrom 以上の頂点が布になり、留める頂点からはこの骨の重みを除く
+   * （揺れものの骨、布の下で大きく動く骨＝脚など）
+   */
+  clothBones: Iterable<THREE.Object3D>;
+  /**
+   * 頂点ごとの布の度合い（0〜1、mesh.geometry の頂点順）。指定すると、布にする頂点はこれで決める
+   * （clothBones は留める頂点から除く重みにだけ使う）
+   */
+  clothWeights?: ArrayLike<number>;
+  /**
+   * 基準の骨（人体なら腰）。布全体がこの骨に乗っているとみなす：近い点の組の作り直しや、姿勢が飛んだかの判定の基準。
+   * mesh の骨格にある骨なら、書き戻す頂点はこの骨に付ける
+   */
+  reference: THREE.Object3D;
+  /** 布が当たる体。省くと当たり判定なし */
+  colliders?: SkinnedClothColliders | null;
+  /** 行列を更新する根（省くと mesh のいちばん上の親） */
+  root?: THREE.Object3D;
+  /**
+   * 頂点が布になるのに要る、clothBones の骨の重みの割合。小さいほど布の範囲が広い（上げた太ももをよけられる）。
    * VRoid のスカートは 0.5 だと上半分が腰に付いたままで、水平まで上げた太ももが 44mm めり込む。0.05 で 1mm 未満
    */
   freeFrom?: number;
   /** 三角形を4分割する回数。'auto' は辺が edge くらいになる回数 */
   sub?: number | 'auto';
   /**
-   * 目の細かさ（m）。布になる部分の辺がこのくらいになるまで分割する。既定 1.5cm で aoi-school.vrm・emili-private.vrm とも
+   * 目の細かさ（m）。布になる部分の辺がこのくらいになるまで分割する。既定 1.5cm で、VRoid のスカート・ワンピースは
    * 1 回分割（布 1000 点前後、ソルバー 3〜5ms）。1cm まで細かくすると 16ms かかり、めり込みは減らない
    */
   edge?: number;
   maxTriangles?: number;
   /**
    * 重力で垂れる分の補正の回数（0 で補正なし）。補正しないと、長いスカートは裾の広がりがモデルの 87% まで狭まる。
-   * 1 回につき 60 フレーム分を読み込み時に計算する
+   * 1 回につき 60 フレーム分を作成時に計算する
    */
   restFit?: number;
   /** 体の距離の格子の目（m） */
@@ -61,18 +87,16 @@ export interface VrmSkirtOptions {
   solver?: Partial<ClothOptions>;
 }
 
-/** 風（springWind.ts の WindSettings と同じ形） */
-export interface SkirtWind {
-  direction: { x: number; y: number; z: number };
-  strength: number;
+/** 風。velocity は吹いていく向きと速さ（m/s、ワールド座標） */
+export interface ClothWind {
+  velocity: { x: number; y: number; z: number };
+  /** 強弱の揺らぎ（0 = 一定、1 = 止む瞬間がある。既定 0.6） */
   gust?: number;
 }
 
-/** 風の強さ（揺れものの重力の単位）を風速（m/s）に直す倍率。0.1（そよ風）で 2m/s */
-const WIND_SPEED = 20;
-/** 1フレームでこれ以上（m）腰が動いたら、姿勢が飛んだ（カット・立ち位置の変更）とみなして布を置き直す */
+/** 1フレームでこれ以上（m）基準の骨が動いたら、姿勢が飛んだ（カット・立ち位置の変更）とみなして布を置き直す */
 const JUMP_DISTANCE = 0.4;
-/** 同じく、腰の向きがこれ以上（ラジアン）変わったら置き直す */
+/** 同じく、基準の骨の向きがこれ以上（ラジアン）変わったら置き直す */
 const JUMP_ANGLE = 1.0;
 /** ソルバーの刻み（秒）。フレームの長さに合わせてサブステップ数を決める */
 const SUBSTEP = 1 / 960;
@@ -83,11 +107,14 @@ const _m4 = new THREE.Matrix4();
 const _v = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 
-export class VrmSkirt {
+/** リグの重み：[骨の番号, 重み] の並び */
+type Weights = [number, number][];
+
+export class SkinnedCloth {
   /** ソルバー。摘む（startGrab / moveGrab / endGrab）・計測（measure）はここから */
   public readonly cloth: Cloth;
   public readonly info: {
-    skirt: string; splits: number; cloth: number; held: number;
+    mesh: string; splits: number; cloth: number; held: number;
     pieces: { bone: string; triangles: number; grid: [number, number, number] }[];
   };
   private enabled = true;
@@ -100,12 +127,12 @@ export class VrmSkirt {
   private hasLast = false;
 
   private constructor(
-    private readonly vrm: VRM,
+    private readonly root: THREE.Object3D,
     private readonly mesh: THREE.SkinnedMesh,
     private readonly original: THREE.BufferGeometry,
     private readonly geometry: THREE.BufferGeometry,
     cloth: Cloth,
-    private readonly hips: THREE.Object3D | null,
+    private readonly hips: THREE.Object3D,
     private readonly hipsIndex: number,
     private readonly pieceBones: THREE.Object3D[],
     /** 描画頂点ごとの、変形前の位置（メッシュの bindMatrix を通した後） */
@@ -115,72 +142,63 @@ export class VrmSkirt {
     private readonly skinHeld: Weights[],
     /** 布の点ごとの代表の描画頂点 */
     private readonly rep: Int32Array,
-    info: VrmSkirt['info'],
+    info: SkinnedCloth['info'],
   ) {
     this.cloth = cloth;
     this.info = info;
     this.posed = new Float64Array(cloth.n * 3);
-    if (hips) this.hipsRestInverse.copy(hips.matrixWorld).invert();
+    this.hipsRestInverse.copy(hips.matrixWorld).invert();
     mesh.geometry = geometry;
     mesh.frustumCulled = false;
     this.settle();
   }
 
-  /** create の options に指定がない項目の既定値（調整・検証用。ここを書き換えてからモデルを読み込む） */
-  static defaults: VrmSkirtOptions = {};
+  /** create の options に指定がない項目の既定値（調整・検証用。ここを書き換えてから作る） */
+  static defaults: Partial<SkinnedClothOptions> = {};
 
   /** 直前の create が null を返した理由（調べる用） */
   static skipped = '';
 
-  /** 読み込み直後（モーションを当てる前の姿勢）に呼ぶ。布にできるスカートがなければ null */
-  static create(vrm: VRM, given: VrmSkirtOptions = {}): VrmSkirt | null {
-    const options: VrmSkirtOptions = { ...VrmSkirt.defaults, ...given, solver: { ...VrmSkirt.defaults.solver, ...given.solver } };
-    VrmSkirt.skipped = '';
-    const skip = (reason: string): null => { VrmSkirt.skipped = reason; return null; };
-    const { freeFrom = 0.05, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {} } = options;
-    if (!vrm.humanoid) return skip('humanoid がない');
-    vrm.scene.updateMatrixWorld(true);
-    // 布にする骨：腰（か脚）から生えている揺れもの。袖・胸・髪の揺れものは、いちばん近い人体の骨が腕・胸・頭なので
-    // 入らない（ワンピースの袖まで布にすると、腕に当たり判定がないので袖が腕を抜けて落ちる）
-    const humanBones = new Set<THREE.Object3D>(Object.values(vrm.humanoid.humanBones).map((b) => b?.node).filter((b): b is THREE.Object3D => !!b));
-    const lowerBody = new Set<THREE.Object3D>(
-      (['hips', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'] as const).map((name) => vrm.humanoid.getRawBoneNode(name)).filter((b): b is THREE.Object3D => !!b),
-    );
-    const freeBones = new Set<THREE.Object3D>();
-    for (const joint of vrm.springBoneManager?.joints ?? []) {
-      let o: THREE.Object3D | null = joint.bone;
-      while (o && !humanBones.has(o)) o = o.parent;
-      if (o && lowerBody.has(o)) freeBones.add(joint.bone);
+  /** モデルが基準の姿勢のときに呼ぶ。布になる頂点がなければ null */
+  static create(given: SkinnedClothOptions): SkinnedCloth | null {
+    const options: SkinnedClothOptions = { ...SkinnedCloth.defaults, ...given, solver: { ...SkinnedCloth.defaults.solver, ...given.solver } };
+    SkinnedCloth.skipped = '';
+    const skip = (reason: string): null => { SkinnedCloth.skipped = reason; return null; };
+    const { mesh, freeFrom = 0.05, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {} } = options;
+    let root = options.root ?? mesh as THREE.Object3D;
+    if (!options.root) while (root.parent) root = root.parent;
+    root.updateMatrixWorld(true);
+    if (!mesh.geometry.index || !mesh.geometry.attributes.uv) return skip('メッシュに index か uv がない');
+    const freeBones = new Set<THREE.Object3D>(options.clothBones);
+    const sk = describePart(mesh, freeBones);
+    if (options.clothWeights) {
+      // 頂点ごとの指定は mesh.geometry の頂点順。部品は自分の頂点だけに詰めてあるので、位置で対応を取る
+      const all = options.clothWeights, P = mesh.geometry.attributes.position, used = new Int32Array(P.count).fill(-1);
+      const idx = mesh.geometry.index.array;
+      let next = 0;
+      for (let i = 0; i < idx.length; i++) if (used[idx[i]] < 0) used[idx[i]] = next++;
+      const free = new Float32Array(next);
+      for (let i = 0; i < P.count; i++) if (used[i] >= 0) free[used[i]] = all[i] ?? 0;
+      sk.free = free;
     }
-    if (freeBones.size === 0) return skip('腰から生えた揺れものの骨がない');
-    // 脚の骨も「体に留めない骨」に入れる。VRoid のスカートは上のほうに太ももの重みが少し入っていて、そこを脚に付けた
-    // まま留めると、座ったとき留めた点が太ももと一緒に 90 度前へ回り、布が引き伸ばされて震え続ける
-    // （止まった座り姿勢で 1027 点中 186 点が 0.3m/s 以上で動いた）。留めるのは腰と背骨に付いた分だけ
-    for (const name of ['leftUpperLeg', 'rightUpperLeg'] as const) vrm.humanoid.getRawBoneNode(name)?.traverse((bone) => freeBones.add(bone));
-    const parts = describeParts(vrm.scene, freeBones);
-
-    // スカートの部品：揺れものに付いた頂点を持つ部品のうち、名前で分かればそれ、なければ形で選ぶ
-    const withCloth = parts.filter((p) => p.free?.some((f) => f >= freeFrom));
-    const named = withCloth.filter((p) => /bottoms|skirt|onepiece|dress/i.test(`${p.materialName} ${p.name}`));
-    const sk = options.skirt
-      ? parts.find((p) => p.name === options.skirt || p.materialName === options.skirt)
-      : pickSkirt(named) ?? pickSkirt(withCloth);
-    if (!sk || !sk.free) return skip(`スカートの部品が見つからない（揺れものに付いた部品：${withCloth.map((p) => p.materialName || p.name).join('、') || 'なし'}）`);
-    if (!sk.geometry.attributes.uv) return skip('スカートの部品に uv がない');
-    const mesh = sk.mesh, skeleton = mesh.skeleton;
+    if (!sk.free || !sk.free.some((f) => f >= freeFrom)) return skip('布になる頂点がない（clothBones の骨に付いた頂点がない）');
+    const skeleton = mesh.skeleton;
     const topY = sk.box.max.y, hemY = sk.box.min.y, len = topY - hemY;
 
-    // ---- スカートの下の体を、骨ごとの剛体に切る ----
-    const pieceBones = PIECE_BONES.map((name) => vrm.humanoid.getRawBoneNode(name)).filter((b): b is THREE.Object3D => !!b);
+    // ---- 布の下の体を、骨ごとの剛体に切る ----
+    const pieceBones = options.colliders?.bones ?? [];
+    const stopBones = new Set<THREE.Object3D>(options.colliders?.stopBones ?? []);
     const colliders: ClothCollider[] = [];
     const pieces: { bone: THREE.Object3D; triangles: number; grid: [number, number, number] }[] = [];
-    for (const body of pickColliders(parts, sk)) {
-      // 骨は、親をたどって最初に当たる部品の骨に属する。先に体の別の部位の骨（胸・腕・足）に当たるものは含めない
+    for (const bodyMesh of options.colliders?.meshes ?? []) {
+      if (bodyMesh === mesh || !bodyMesh.geometry.index) continue;
+      const body = describePart(bodyMesh, freeBones);
+      // 骨は、親をたどって最初に当たる部品の骨に属する。先に stopBones の骨に当たるものは含めない
       const pieceOf = body.mesh.skeleton.bones.map((b) => {
         for (let o: THREE.Object3D | null = b; o; o = o.parent) {
           const k = pieceBones.indexOf(o);
           if (k >= 0) return k;
-          if (humanBones.has(o)) return -1;
+          if (stopBones.has(o)) return -1;
         }
         return -1;
       });
@@ -219,7 +237,7 @@ export class VrmSkirt {
       }
     }
 
-    // ---- スカートを細かく分割する。リグの重みと変形前の位置は、新しい頂点へ引き継ぐ ----
+    // ---- 布のメッシュを細かく分割する。リグの重みと変形前の位置は、新しい頂点へ引き継ぐ ----
     const g0 = sk.geometry;
     const free0 = sk.free;
     let sp = subdividable(g0.attributes.position.array, g0.attributes.uv.array, g0.index!.array, Float32Array.from(free0, (f) => (f >= freeFrom ? 1 : 0)));
@@ -262,7 +280,7 @@ export class VrmSkirt {
       bind[i * 3] = _v.x; bind[i * 3 + 1] = _v.y; bind[i * 3 + 2] = _v.z;
     }
 
-    // 腰の中心（「外向き」と裾の広がりの計測に使う）
+    // 上端の中心（「外向き」と裾の広がりの計測に使う）
     let px = 0, pz = 0, pn = 0;
     for (let i = 0; i < sp.position.length; i += 3) if (sp.position[i + 1] > topY - 0.066 * len) { px += sp.position[i]; pz += sp.position[i + 2]; pn++; }
 
@@ -273,8 +291,8 @@ export class VrmSkirt {
     if (restFit > 0) cloth.fitRestToGravity(restFit);
 
     // ---- 同じメッシュに持たせる新しいジオメトリ ----
-    const hips = vrm.humanoid.getRawBoneNode('hips');
-    const hipsIndex = Math.max(0, hips ? skeleton.bones.indexOf(hips as THREE.Bone) : 0);
+    const hips = options.reference;
+    const hipsIndex = Math.max(0, skeleton.bones.indexOf(hips as THREE.Bone));
     const geometry = new THREE.BufferGeometry();
     const position = new THREE.BufferAttribute(new Float32Array(nR * 3), 3).setUsage(THREE.DynamicDrawUsage);
     const normal = new THREE.BufferAttribute(new Float32Array(nR * 3), 3).setUsage(THREE.DynamicDrawUsage);
@@ -305,8 +323,8 @@ export class VrmSkirt {
     const rep = new Int32Array(cloth.n).fill(-1);
     for (let r = 0; r < nR; r++) if (rep[cloth.map[r]] < 0) rep[cloth.map[r]] = r;
 
-    return new VrmSkirt(vrm, mesh, mesh.geometry, geometry, cloth, hips, hipsIndex, pieces.map((p) => p.bone), bind, skin, skinHeld, rep, {
-      skirt: sk.materialName || sk.name, splits, cloth: cloth.n - cloth.pinned.length, held: cloth.pinned.length,
+    return new SkinnedCloth(root, mesh, mesh.geometry, geometry, cloth, hips, hipsIndex, pieces.map((p) => p.bone), bind, skin, skinHeld, rep, {
+      mesh: sk.materialName || sk.name, splits, cloth: cloth.n - cloth.pinned.length, held: cloth.pinned.length,
       pieces: pieces.map((p) => ({ bone: p.bone.name, triangles: p.triangles, grid: p.grid })),
     });
   }
@@ -326,10 +344,10 @@ export class VrmSkirt {
 
   /** 骨の今の姿勢を、ソルバーの枠（体全体・体の部品・固定する点の行き先）へ渡す */
   private readRig(): void {
-    this.vrm.scene.updateMatrixWorld(true);
+    this.root.updateMatrixWorld(true);
     this.mesh.skeleton.update();
     const frames = this.cloth.frames;
-    if (this.hips) to12(_m4.multiplyMatrices(this.hips.matrixWorld, this.hipsRestInverse), frames.ref.M);
+    to12(_m4.multiplyMatrices(this.hips.matrixWorld, this.hipsRestInverse), frames.ref.M);
     for (let q = 0; q < this.pieceBones.length; q++) to12(this.pieceBones[q].matrixWorld, frames.colliders[q].M);
     for (const i of this.cloth.pinned) this.pose(i, frames.pinTarget, i * 3, this.skinHeld);
   }
@@ -358,11 +376,11 @@ export class VrmSkirt {
     this.write();
   }
 
-  /** 腰が1フレームで大きく動いた・向きを変えたか */
+  /** 基準の骨が1フレームで大きく動いた・向きを変えたか */
   private jumped(): boolean {
     if (!this.hasLast) return true;
     const m = this.cloth.frames.ref.M, l = this.lastRef;
-    // 腰の位置（骨の原点）の移動は、枠の並進の差とほぼ同じ
+    // 基準の骨の位置の移動は、枠の並進の差とほぼ同じ
     if (Math.hypot(m[3] - l[3], m[7] - l[7], m[11] - l[11]) > JUMP_DISTANCE) return true;
     // 回転の差：trace(Rm · Rlᵀ) = 1 + 2cos(角度)
     const trace = m[0] * l[0] + m[1] * l[1] + m[2] * l[2] + m[4] * l[4] + m[5] * l[5] + m[6] * l[6] + m[8] * l[8] + m[9] * l[9] + m[10] * l[10];
@@ -370,13 +388,13 @@ export class VrmSkirt {
   }
 
   /**
-   * 1フレーム進める。姿勢が決まった後（モーション・vrm.update の後）に呼ぶ。
-   * wind は場所の風（springWind.ts と同じ設定）。null で無風
+   * 1フレーム進める。姿勢が決まった後（モーションや揺れものの更新の後）に呼ぶ。wind は null で無風
    */
-  update(delta: number, wind?: SkirtWind | null): void {
+  update(delta: number, wind?: ClothWind | null): void {
     if (!this.enabled) return;
     this.time += delta;
-    if (!this.vrm.scene.visible || delta <= 0) { this.hasLast = false; return; }
+    if (!this.mesh.visible || delta <= 0) { this.hasLast = false; return; }
+    for (let o: THREE.Object3D | null = this.mesh.parent; o; o = o.parent) if (!o.visible) { this.hasLast = false; return; }
     this.readRig();
     if (delta > 0.25 || this.jumped()) {
       this.settle();
@@ -385,12 +403,13 @@ export class VrmSkirt {
     this.lastRef.set(this.cloth.frames.ref.M);
     const w = this.cloth.wind;
     w[0] = w[1] = w[2] = 0;
-    if (wind && wind.strength > 0) {
+    if (wind) {
       const t = this.time, gust = wind.gust ?? 0.6;
+      // ゆっくりした強弱（周期の違う正弦波の和）と、向きの小さな振れ
       const swell = 0.5 * Math.sin(t * 1.1) + 0.3 * Math.sin(t * 2.3 + 1.7) + 0.2 * Math.sin(t * 0.47 + 4.1);
-      _v.set(wind.direction.x, wind.direction.y, wind.direction.z);
+      _v.set(wind.velocity.x, wind.velocity.y, wind.velocity.z);
       if (_v.lengthSq() > 0) {
-        _v.normalize().applyAxisAngle(_up, 0.25 * gust * Math.sin(t * 0.31 + 0.6)).multiplyScalar(wind.strength * WIND_SPEED * Math.max(0, 1 + gust * swell));
+        _v.applyAxisAngle(_up, 0.25 * gust * Math.sin(t * 0.31 + 0.6)).multiplyScalar(Math.max(0, 1 + gust * swell));
         w[0] = _v.x; w[1] = _v.y; w[2] = _v.z;
       }
     }
@@ -402,7 +421,7 @@ export class VrmSkirt {
     this.write();
   }
 
-  /** 布を止めて元のジオメトリ（揺れものの骨で動くスカート）に戻す／布に戻す */
+  /** 布を止めて元のジオメトリ（元の骨で動くメッシュ）に戻す／布に戻す */
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
@@ -423,6 +442,11 @@ export class VrmSkirt {
     }
     return best;
   }
+
+  /** 摘む。座標はワールド座標（raycast の point をそのまま渡せる） */
+  startGrab(point: THREE.Vector3): boolean { return this.cloth.startGrab(point.x, point.y, point.z); }
+  moveGrab(point: THREE.Vector3): void { this.cloth.moveGrab(point.x, point.y, point.z); }
+  endGrab(): void { this.cloth.endGrab(); }
 
   /** 新しいジオメトリを捨てる。元のジオメトリはメッシュに戻すだけ（モデルの破棄で一緒に捨てられる） */
   dispose(): void {

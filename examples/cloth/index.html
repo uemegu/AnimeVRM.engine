@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>布のシミュレーションの例</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #26282b; color: #e8e8ea; font: 13px/1.5 system-ui, sans-serif; overflow: hidden; }
+      canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+      canvas.pinch { cursor: grabbing; }
+      #panel { position: fixed; left: 12px; top: 12px; width: 250px; padding: 10px 12px; background: rgba(20, 21, 24, 0.78); border-radius: 10px; }
+      #panel h1 { font-size: 13px; margin: 0 0 6px; }
+      #panel p { margin: 0 0 8px; color: #b9bbc0; font-size: 12px; }
+      .row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+      button { flex: 1 1 auto; padding: 6px 8px; border: 0; border-radius: 6px; background: #3d4046; color: inherit; font: inherit; cursor: pointer; }
+      button:hover { background: #50545c; }
+      button.on { background: #4a6fd8; }
+      label { display: grid; grid-template-columns: 60px 1fr 40px; align-items: center; gap: 6px; }
+      input[type=range] { width: 100%; }
+      #status { margin-top: 8px; color: #9a9da3; font-size: 11px; white-space: pre-line; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="panel">
+      <h1>布のシミュレーションの例</h1>
+      <p>スカートをドラッグ：摘む<br />背景をドラッグ：視点を回す</p>
+      <div class="row" id="motions"></div>
+      <div class="row"><button id="toggle">布：入</button></div>
+      <label>風 <input id="wind" type="range" min="0" max="10" step="0.5" value="0" /><span id="windValue">0</span></label>
+      <div id="status">読み込み中</div>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

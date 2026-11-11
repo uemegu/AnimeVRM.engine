@@ -3,7 +3,7 @@
  * 必要な素材はモデル（public/models/aoi-school.vrm）だけで、待機モーションの FBX は使わない（腕を下ろした姿勢で立つ）
  *
  * URL で切り替えられるもの：
- * - ?cloth=1        スカートを布として動かす（cloth/VrmSkirt.ts）
+ * - ?cloth=1        スカートを布として動かす（src/cloth）
  * - ?motion=<名前>  public/animations/<名前>.fbx のモーションを繰り返す（FBX は自分で置く）
  * - ?model=<URL>    読み込む VRM（省くと public/models/aoi-school.vrm）
  */

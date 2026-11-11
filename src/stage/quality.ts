@@ -13,7 +13,7 @@ export interface StageQuality {
   /** 手に押されてスカートがへこむ（avatar/clothDent.ts）。頂点シェーダーで行うので軽い */
   clothDent: boolean;
   /**
-   * スカートを布として動かす（cloth/VrmSkirt.ts）。揺れものの骨の代わりに、脚をよけて垂れる布になる。
+   * スカートを布として動かす（cloth/）。揺れものの骨の代わりに、脚をよけて垂れる布になる。
    * CPU で 1 人あたり 1 フレーム 3〜5ms（負荷の高い PC では 12〜14ms かかり 60fps を割った）。
    * 既定は切（確かめたモデル・モーションがまだ少ない）
    */

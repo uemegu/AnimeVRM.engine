@@ -1,0 +1,18 @@
+/**
+ * 布のシミュレーション。この src/cloth だけで完結していて、three.js 以外に依存しない（engine のほかの部分も使わない）。
+ *
+ * - solver / sdf：点と拘束のソルバーと、体の距離の格子。three.js にも依存しない
+ * - SkinnedCloth：骨で動くメッシュ（SkinnedMesh）の一部を布にする
+ * - createVrmSkirt：VRM のスカートを布にする（SkinnedCloth へ渡すものを VRM の決まりごとから埋める）
+ * - MeshCloth：骨のないメッシュを、上端で吊った布にする
+ * - createMeshSkirt：骨のない、部品に分かれたモデルのスカートを布にする（MeshCloth へ渡すものを形から選ぶ）
+ *
+ * 使い方は README.md。
+ */
+export { SkinnedCloth, type SkinnedClothOptions, type SkinnedClothColliders, type ClothWind } from './SkinnedCloth';
+export { createVrmSkirt, type VrmLike, type VrmSkirtOptions } from './vrm';
+export { MeshCloth, type MeshClothOptions } from './MeshCloth';
+export { createMeshSkirt, skirtMetresPerUnit, WAIST_RADIUS, type MeshSkirtOptions } from './mesh';
+export { describeParts, describeMeshes, describePart, pickSkirt, pickColliders, hemOf, type ModelPart, type OpenRim } from './parts';
+export { createCloth, subdivide, type Cloth, type ClothInput, type ClothOptions, type ClothCollider } from './solver';
+export { buildSDF, capRims, weld, type DistanceGrid, type WeldedMesh } from './sdf';

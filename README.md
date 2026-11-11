@@ -51,7 +51,9 @@ stage.setCameraShot('wide', 'aoi');
 
 ## スカートを布として動かす
 
-`quality: { skirtCloth: true }`（`StageManager` のオプション、または `setQuality`）で、スカートを揺れものの骨の代わりに布として動かします（`src/cloth/VrmSkirt.ts`）。既定は切です。
+`quality: { skirtCloth: true }`（`StageManager` のオプション、または `setQuality`）で、スカートを揺れものの骨の代わりに布として動かします（`src/cloth`）。既定は切です。
+
+布の部分（`src/cloth`）は engine のほかの部分に依存しておらず、単独でも使えます。VRM でない骨つきモデルや、骨のない部品に分かれただけのモデルへの使い方は [src/cloth/README.md](src/cloth/README.md)、単独の例は `npm run example:cloth` です。
 
 - モデルは骨・材質・輪郭線ともそのままで、スカートの部品のジオメトリだけを細かく分割したものに差し替え、頂点を毎フレーム書き換えます。
 - 布になるのは、腰から生えた揺れもの（スプリングボーン）の骨に付いた頂点です。袖や髪の揺れものはそのままです。ワンピースの裾も布になります。揺れものの付いていないスカートは布になりません（そのまま）。

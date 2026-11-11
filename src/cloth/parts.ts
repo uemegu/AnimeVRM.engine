@@ -15,16 +15,16 @@ export interface OpenRim {
   r: number;
 }
 
-export interface ModelPart {
-  mesh: THREE.SkinnedMesh;
+export interface ModelPart<M extends THREE.Mesh = THREE.Mesh> {
+  mesh: M;
   name: string;
   materialName: string;
-  /** 今の姿勢のワールド座標。position・normal・uv と、リグの skinIndex・skinWeight、変形前の bindPosition を持つ */
+  /** 今の姿勢のワールド座標。position・normal・uv。リグ付きなら skinIndex・skinWeight と、変形前の bindPosition も持つ */
   geometry: THREE.BufferGeometry;
   box: THREE.Box3;
   /** 大きい順 */
   rims: OpenRim[];
-  /** 頂点ごとに、揺れもの（スプリングボーン）の骨に付いている重みの割合。揺れものがなければ null */
+  /** 頂点ごとに、布にする骨に付いている重みの割合。リグがない・布にする骨の指定がなければ null */
   free: Float32Array | null;
 }
 
@@ -68,35 +68,56 @@ function openRims(position: ArrayLike<number>, index: ArrayLike<number>): OpenRi
   return rims.sort((a, b) => b.n - a.n);
 }
 
-/** root の下の、リグの付いたメッシュを部品にする。freeBones は揺れものの骨 */
-export function describeParts(root: THREE.Object3D, freeBones: Set<THREE.Object3D>): ModelPart[] {
+/** root の下の、リグの付いたメッシュを部品にする。freeBones は布にする骨（部品ごとの free の計算に使う） */
+export function describeParts(root: THREE.Object3D, freeBones: Set<THREE.Object3D>): ModelPart<THREE.SkinnedMesh>[] {
   root.updateMatrixWorld(true);
-  const parts: ModelPart[] = [];
-  const v = new THREE.Vector3();
+  const parts: ModelPart<THREE.SkinnedMesh>[] = [];
   root.traverse((object) => {
     const o = object as THREE.SkinnedMesh;
-    if (!o.isSkinnedMesh || !o.geometry.index) return;
+    if (o.isSkinnedMesh && o.geometry.index) parts.push(describePart(o, freeBones));
+  });
+  return parts;
+}
+
+/** root の下のメッシュを、リグのあるなしに関わらず部品にする（骨のないモデル用） */
+export function describeMeshes(root: THREE.Object3D): ModelPart[] {
+  root.updateMatrixWorld(true);
+  const parts: ModelPart[] = [];
+  root.traverse((object) => {
+    const o = object as THREE.Mesh;
+    if (o.isMesh && o.geometry.index) parts.push(describePart(o, new Set()));
+  });
+  return parts;
+}
+
+/** メッシュ1つを部品にする（ワールド行列は更新済みのこと）。リグ付きなら今の骨の姿勢にする */
+export function describePart<M extends THREE.Mesh>(o: M, freeBones: Set<THREE.Object3D>): ModelPart<M> {
+  const v = new THREE.Vector3();
+  {
     const g = o.geometry.clone();
     g.morphAttributes = {};
-    g.setAttribute('bindPosition', g.attributes.position.clone());
-    // 今の骨の姿勢へ
-    o.skeleton.update();
+    const skinned = (o as unknown as THREE.SkinnedMesh).isSkinnedMesh ? (o as unknown as THREE.SkinnedMesh) : null;
     const P = g.attributes.position;
-    let moved = 0;
-    for (let i = 0; i < P.count; i++) {
-      o.getVertexPosition(i, v);
-      moved = Math.max(moved, Math.abs(v.x - P.getX(i)), Math.abs(v.y - P.getY(i)), Math.abs(v.z - P.getZ(i)));
-      P.setXYZ(i, v.x, v.y, v.z);
-    }
-    if (moved > 1e-4) g.computeVertexNormals();
     let free: Float32Array | null = null;
-    if (freeBones.size) {
-      const J = g.attributes.skinIndex, W = g.attributes.skinWeight, isFree = o.skeleton.bones.map((b) => freeBones.has(b));
-      free = new Float32Array(P.count);
+    if (skinned) {
+      g.setAttribute('bindPosition', g.attributes.position.clone());
+      // 今の骨の姿勢へ
+      skinned.skeleton.update();
+      let moved = 0;
       for (let i = 0; i < P.count; i++) {
-        let f = 0, t = 0;
-        for (let k = 0; k < 4; k++) { const wt = W.getComponent(i, k); t += wt; if (isFree[J.getComponent(i, k)]) f += wt; }
-        free[i] = t ? f / t : 0;
+        skinned.getVertexPosition(i, v);
+        moved = Math.max(moved, Math.abs(v.x - P.getX(i)), Math.abs(v.y - P.getY(i)), Math.abs(v.z - P.getZ(i)));
+        P.setXYZ(i, v.x, v.y, v.z);
+      }
+      if (moved > 1e-4) g.computeVertexNormals();
+      if (freeBones.size) {
+        const J = g.attributes.skinIndex, W = g.attributes.skinWeight, isFree = skinned.skeleton.bones.map((b) => freeBones.has(b));
+        free = new Float32Array(P.count);
+        for (let i = 0; i < P.count; i++) {
+          let f = 0, t = 0;
+          for (let k = 0; k < 4; k++) { const wt = W.getComponent(i, k); t += wt; if (isFree[J.getComponent(i, k)]) f += wt; }
+          free[i] = t ? f / t : 0;
+        }
       }
     }
     // 共有している頂点バッファから、この部品が使う頂点だけを取り出す
@@ -115,12 +136,11 @@ export function describeParts(root: THREE.Object3D, freeBones: Set<THREE.Object3
     g.applyMatrix4(o.matrixWorld);
     g.computeBoundingBox();
     const materialName = (Array.isArray(o.material) ? o.material[0] : o.material)?.name || '';
-    parts.push({
+    return {
       mesh: o, name: o.name || materialName, materialName, free, geometry: g, box: g.boundingBox!,
       rims: openRims(g.attributes.position.array, g.index!.array),
-    });
-  });
-  return parts;
+    };
+  }
 }
 
 /** 部品の裾：下 1/3 にある開いた縁のうち、いちばん大きいもの（ワンピースは襟ぐりや袖口の縁のほうが大きいことがある） */
@@ -133,11 +153,11 @@ export function hemOf(part: ModelPart): OpenRim | null {
  * スカートらしい部品。下 1/3 に開いた縁（裾）があり、細い帯（ベルト）ではないもののうち、裾がいちばん広いもの。
  * ワンピースも入る
  */
-export function pickSkirt(parts: ModelPart[]): ModelPart | null {
+export function pickSkirt<P extends ModelPart>(parts: P[]): P | null {
   const all = new THREE.Box3();
   for (const p of parts) all.union(p.box);
   const H = all.max.y - all.min.y;
-  let best: ModelPart | null = null, bestRadius = 0;
+  let best: P | null = null, bestRadius = 0;
   for (const p of parts) {
     const hem = hemOf(p), h = p.box.max.y - p.box.min.y;
     if (!hem || h < 0.15 * H) continue;
@@ -147,7 +167,7 @@ export function pickSkirt(parts: ModelPart[]): ModelPart | null {
 }
 
 /** スカートが触れる体：裾より下まで伸び、スカートの高さと重なる部品（靴は下すぎ、上着は裾より下へ届かない） */
-export function pickColliders(parts: ModelPart[], skirt: ModelPart): ModelPart[] {
+export function pickColliders<P extends ModelPart>(parts: P[], skirt: P): P[] {
   const hem = skirt.box.min.y, len = skirt.box.max.y - hem;
   return parts.filter((p) => p !== skirt && p.box.min.y < hem - 0.05 * len && p.box.max.y > hem + 0.2 * len);
 }

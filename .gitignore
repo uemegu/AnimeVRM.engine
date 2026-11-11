@@ -2,3 +2,5 @@ node_modules/
 dist/
 # 例で試すモーション（?motion=）は各自で置く
 examples/basic/public/animations/
+# 例で試す手元のモデル（?model=/local/…）
+examples/basic/public/local/
