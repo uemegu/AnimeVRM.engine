@@ -61,6 +61,17 @@ export const CinematicAnimeShader = {
     uFisheyeStrength: { value: 0.5 },
     uFisheyeZoom: { value: 1.0 },
     uFisheyeCircular: { value: 0.0 },
+
+    // 9. Character Finish (Backlight Rim & Highlight Cap)
+    tMask: { value: null as THREE.Texture | null },
+    tEye: { value: null as THREE.Texture | null },
+    uFinishEnabled: { value: 0.0 },
+    uRimColor: { value: new THREE.Color(0, 0, 0) },
+    uRimScreen: { value: new THREE.Vector2(0.5, 1.5) },
+    uRimWidth: { value: 4.5 },
+    uCapKnee: { value: 1.0 },
+    uCapTop: { value: 1.0 },
+    uEyeCare: { value: 0.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -118,7 +129,31 @@ export const CinematicAnimeShader = {
     uniform float uFisheyeZoom;
     uniform float uFisheyeCircular;
 
+    // Character Finish
+    uniform sampler2D tMask;
+    uniform sampler2D tEye;
+    uniform float uFinishEnabled;
+    uniform vec3 uRimColor;
+    uniform vec2 uRimScreen;
+    uniform float uRimWidth;
+    uniform float uCapKnee;
+    uniform float uCapTop;
+    uniform float uEyeCare;
+
     varying vec2 vUv;
+
+    float characterAt(vec2 p) {
+      return step(texture2D(tMask, p).r, 0.99999);
+    }
+
+    float isEyeAt(vec2 p) {
+      float eyeDepth = texture2D(tEye, p).r;
+      return step(eyeDepth, 0.99999) * step(eyeDepth, texture2D(tMask, p).r + 0.000002);
+    }
+
+    float eyeAt(vec2 p) {
+      return uEyeCare * isEyeAt(p);
+    }
 
     // Relative luminance
     float getLuma(vec3 c) {
@@ -352,6 +387,80 @@ export const CinematicAnimeShader = {
       // ----------------------------------------------------
       if (uFisheyeEnabled > 0.5 && uFisheyeStrength > 0.001) {
         color = mix(vec3(0.0), color, fisheyeMask);
+      }
+
+      // ----------------------------------------------------
+      // 9. Character Finish (Backlight Rim & Highlight Cap)
+      // ----------------------------------------------------
+      color = clamp(color, 0.0, 1.0);
+      if (uFinishEnabled > 0.5 && characterAt(uv) > 0.5) {
+        if (dot(uRimColor, vec3(1.0)) > 0.001 && uRimWidth > 0.001) {
+          float aspect = uResolution.x / uResolution.y;
+          float pxScale = uResolution.y / 1080.0;
+          float radius = max(0.5, uRimWidth * pxScale);
+
+          float outsideSum = 0.0;
+          float weightSum = 0.0;
+          vec2 outwardVec = vec2(0.0);
+
+          for (int i = 0; i < 24; i++) {
+            float fi = float(i) + 0.5;
+            float r = sqrt(fi / 24.0);
+            float theta = fi * 2.39996323;
+            vec2 d = vec2(cos(theta), sin(theta));
+            vec2 sampleUv = uv + d * (radius * r) / uResolution;
+            float isOut = 1.0 - characterAt(sampleUv);
+            float w = 1.0 - r * 0.85;
+            outsideSum += isOut * w;
+            weightSum += w;
+            outwardVec += d * (isOut * w);
+          }
+
+          float outsideGrad = outsideSum / weightSum;
+          float rimLevel = clamp(max(uRimColor.r, max(uRimColor.g, uRimColor.b)), 0.0, 1.0);
+          vec3 rimHue = uRimColor / max(rimLevel, 1e-3);
+
+          if (outsideGrad > 0.006 && dot(outwardVec, outwardVec) > 1e-6) {
+            vec2 normOut = normalize(outwardVec);
+            vec2 toLight = normalize((uRimScreen - uv) * vec2(aspect, 1.0));
+            float facing = dot(normOut, toLight);
+            float sunFacing = smoothstep(-0.12, 0.40, facing);
+
+            if (sunFacing > 0.001) {
+              float rimProfile = smoothstep(0.006, 0.28, outsideGrad);
+              float rimCore = pow(rimProfile, 1.4);
+
+              vec3 baseCol = color;
+              float luma = getLuma(baseCol);
+
+              vec3 materialTint;
+              if (baseCol.b > baseCol.r * 1.12 && luma < 0.40) {
+                materialTint = mix(rimHue, vec3(0.88, 0.94, 1.0), 0.35);
+              } else if (luma > 0.58 && baseCol.r > baseCol.b * 0.90) {
+                materialTint = mix(rimHue, vec3(1.0, 0.95, 0.90), 0.35);
+              } else {
+                materialTint = mix(rimHue, vec3(1.0, 0.78, 0.42), 0.35);
+              }
+
+              vec3 rimColor = mix(materialTint, vec3(1.0, 0.98, 0.95), rimCore * 0.65);
+              float isOuterEdge = smoothstep(0.04, 0.22, outsideGrad);
+              vec3 cleanBase = mix(color, max(color, materialTint * 0.75), isOuterEdge * sunFacing * 0.75 * rimLevel);
+
+              vec3 screenLight = clamp(rimColor * rimProfile * 0.98 * sunFacing * rimLevel * (1.0 - eyeAt(uv)), 0.0, 1.0);
+              color = 1.0 - (1.0 - cleanBase) * (1.0 - screenLight);
+
+              vec3 coreAdd = rimColor * (rimCore * 0.75 * sunFacing * rimLevel * (1.0 - eyeAt(uv)));
+              color = clamp(color + coreAdd, 0.0, 1.0);
+            }
+          }
+        }
+
+        float m = max(max(color.r, color.g), color.b);
+        if (m > uCapKnee) {
+          float span = max(uCapTop - uCapKnee, 1e-4);
+          float rolled = uCapKnee + span * (1.0 - exp(-(m - uCapKnee) / span));
+          color *= rolled / m;
+        }
       }
 
       gl_FragColor = vec4(clamp(color, 0.0, 1.0), baseColor.a * fisheyeMask);

@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { applyToonShader, ToonShaderController } from '../ToonShader';
+import { FootContactShadow } from '../avatar/footContactShadow';
 import { HairShadowUniforms } from '../shader/HairShadow';
 import { applySmoothNormalsToHierarchy } from '../shader/SmoothNormalHelper';
 import type { MaterialStyleParams, OutlineConfig } from './visual';
@@ -353,6 +354,7 @@ export class StageAvatar {
   private gazeDirection: THREE.Vector3 | null = null;
   /** 前のフレームで首・頭に足した回転（モーションが上書きしないボーンでも積み重ならないよう、次のフレームで戻す） */
   private appliedTurn: Array<{ bone: THREE.Object3D; rotation: THREE.Quaternion }> = [];
+  private footContactShadow: FootContactShadow | null = null;
 
   public getCurrentExpression(): string {
     return this.currentExpression;
@@ -739,6 +741,29 @@ export class StageAvatar {
     }
   }
 
+  private readonly outlineHeadPos = new THREE.Vector3();
+
+  /**
+   * 画面上の頭の投影サイズから輪郭線の太さ倍率を更新し、その投影サイズ（画面高さに対する割合）を返す
+   */
+  public updateOutlineScreenScale(camera: THREE.PerspectiveCamera): number {
+    if (!this.vrm) return 0;
+    const head = this.vrm.humanoid?.getNormalizedBoneNode('head');
+    if (head) {
+      head.getWorldPosition(this.outlineHeadPos);
+    } else {
+      this.outlineHeadPos.copy(this.vrm.scene.position);
+      this.outlineHeadPos.y += 1.45;
+    }
+    const viewZ = -this.outlineHeadPos.applyMatrix4(camera.matrixWorldInverse).z;
+    const dist = Math.max(viewZ, 0.25);
+    const headFrac = (0.25 * camera.projectionMatrix.elements[5] * 0.5) / dist;
+    const ratio = headFrac / 0.28;
+    const scale = THREE.MathUtils.clamp(Math.pow(Math.max(ratio, 0.01), 0.25), 0.72, 1.25);
+    this.shaderController?.setOutlineScreenScale(scale);
+    return headFrac;
+  }
+
   /**
    * リアルタイム・リップシンク更新
    * 母音（aa, ee, ih, oh, ou）の開口度を VRM ExpressionManager に適用
@@ -849,6 +874,16 @@ export class StageAvatar {
     // 4. VRM SpringBone・Humanoid更新（風は揺れものの重力に足す。濡れた髪・服は重いので風に揺らさない）
     this.springWind?.update(delta, this.wetnessTarget > 0 ? null : this.wind);
     this.vrm.update(delta);
+
+    if (!this.footContactShadow) {
+      this.footContactShadow = new FootContactShadow(this.scene);
+    }
+    this.footContactShadow.update(
+      this.vrm,
+      this.vrm.scene.visible && this.opacity > 0.2,
+      this.vrm.scene.position.y,
+      this.wetnessTarget > 0
+    );
 
     // 4.4 スカートの布（姿勢が決まってから。濡れた服は重いので風に揺らさない）
     this.skirtCloth?.update(delta, this.wetnessTarget > 0 ? null : this.clothWind());
@@ -964,6 +999,8 @@ export class StageAvatar {
     this.wetDrips = null;
     this.skirtCloth?.dispose();
     this.skirtCloth = null;
+    this.footContactShadow?.dispose();
+    this.footContactShadow = null;
     if (this.vrm) {
       VRMUtils.deepDispose(this.vrm.scene);
       this.scene.remove(this.vrm.scene);

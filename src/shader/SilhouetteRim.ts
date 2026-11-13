@@ -18,8 +18,10 @@ export const SILHOUETTE_RIM_UNIFORMS = {
   uSilRimMask: { value: null as THREE.Texture | null },
   uSilRimProjection: { value: new THREE.Matrix4() },
   uSilRimNearFar: { value: new THREE.Vector2(0.1, 100) },
-  // 外形から内側へ測る幅（720 行あたりの px）。理想のアニメ作画に合わせた細くシャープなハイライト帯（約 4px）
-  uSilRimWidth: { value: 4.8 },
+  // 外形から内側へ測る幅（1080 行あたりの px）。理想のアニメ作画に合わせた細くシャープなハイライト帯（720 行で約 4.8px）
+  uSilRimWidth: { value: 7.2 },
+  // カメラの投影サイズに応じた幅の倍率（1.0 = バストアップ基準）
+  uSilRimScale: { value: 1.0 },
   // これより奥（m）にある物との境目だけを外形とみなす（髪と顔、襟の折り目は光らせず、首筋・腕・外形は光らせる）
   uSilRimDepthGap: { value: 0.08 },
   // 全体の濃さ（0 = 切る）。毎フレーム updateSilhouetteRimLight が主光の強さから決める
@@ -73,6 +75,7 @@ export const SILHOUETTE_RIM_GLSL = /* glsl */ `
   uniform mat4 uSilRimProjection;
   uniform vec2 uSilRimNearFar;
   uniform float uSilRimWidth;
+  uniform float uSilRimScale;
   uniform float uSilRimDepthGap;
   uniform float uSilRimStrength;
   uniform vec3 uSilRimLightColor;
@@ -91,7 +94,7 @@ export const SILHOUETTE_RIM_GLSL = /* glsl */ `
     vec2 res = vec2(textureSize(uSilRimMask, 0));
     if (res.x < 2.0) return 0.0;
     float selfZ = -viewPos.z;
-    float widthPx = uSilRimWidth * widthScale * res.y / 720.0;
+    float widthPx = uSilRimWidth * uSilRimScale * widthScale * res.y / 1080.0;
     // 日差しの方向と、その左右 35° の3方向へ進む（外形が日差しに斜めでも途切れないように）
     vec2 dirs[3];
     dirs[0] = sunDir;

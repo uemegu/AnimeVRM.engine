@@ -7,7 +7,7 @@ import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 
 import type { LocationVisualPreset, TimeOfDayId, TimeOfDayPreset } from './visual';
 import { CharacterGlowPass } from '../postprocessing/CharacterGlow';
-import { CharacterFinishShader, type CharacterRim } from '../postprocessing/CharacterFinish';
+import { type CharacterRim } from '../postprocessing/CharacterFinish';
 import { HighlightShoulderShader } from '../postprocessing/HighlightShoulder';
 import { CinematicAnimeShader } from '../postprocessing/CinematicAnimeShader';
 import { FisheyeShader } from '../postprocessing/FisheyeShader';
@@ -33,9 +33,9 @@ import type { EffectPresetName } from '../effects/text/types';
 import { disposeEnvironment, loadEnvironment, placeEnvironment } from './environments';
 import { HairShadowRenderer } from '../shader/HairShadow';
 import { CharacterMaskRenderer, DEFAULT_LIGHT_WRAP_PARAMS, EYE_LAYER, LightWrapShader, VisibleMaskPass } from '../postprocessing/LightWrap';
-import { ParaShader, DEFAULT_PARA_PARAMS, applyParaParams } from '../postprocessing/Para';
+import { ParaPass, DEFAULT_PARA_PARAMS, applyParaParams } from '../postprocessing/Para';
 import { setHairRingTint, HAIR_RING_UNIFORMS } from '../shader/HairRing';
-import { releaseSilhouetteRimMask, renderCharacterMaskForRim, updateSilhouetteRimLight } from '../shader/SilhouetteRim';
+import { releaseSilhouetteRimMask, renderCharacterMaskForRim, SILHOUETTE_RIM_UNIFORMS, updateSilhouetteRimLight } from '../shader/SilhouetteRim';
 import { resolveBloomConfig, resolveLocationVisuals, DEFAULT_BACKDROP, DEFAULT_CAMERA_FOV, DEFAULT_DEPTH_OF_FIELD, DEFAULT_SHOT_RIGS, DEFAULT_SLOT_POSITIONS, type LocationStage, type ShotRig } from '../schema/visual';
 import { DEFAULT_AVATAR_LOOK, type CameraPose as CameraPoseSetting, type CameraShift, type CameraShot, type AvatarOneShot, type CameraEase, type CutAvatarState, type CutState, type CutTimeline, type ResolvedCameraMove, type SceneEffects, type TextContent } from '../schema/stage';
 import type { StageCastMember } from './types';
@@ -149,12 +149,11 @@ export class StageManager {
   /** 雨の地面の映り込み（画面空間の反射。wetGroundSheen のときだけ） */
   private wetReflectionPass: WetReflectionPass;
   private lightWrapPass: ShaderPass;
-  private paraPass: ShaderPass;
+  private paraPass: ParaPass;
   private bloomPass: UnrealBloomPass;
   private highlightShoulderPass: ShaderPass;
   private characterGlowPass: CharacterGlowPass;
   private rimBloomPass: RimBloomPass;
-  private characterFinishPass: ShaderPass;
   private godRaysPass: ShaderPass;
   /** レンズに付く雨粒（雨のあいだ） */
   private lensDroplets: LensDroplets;
@@ -455,6 +454,7 @@ export class StageManager {
 
     // 背景ぼかし（本描画の深度を読むので RenderPass の直後に置く）
     this.depthOfFieldPass = new DepthOfFieldPass();
+    this.depthOfFieldPass.setSize(targetW, targetH);
     this.depthOfFieldPass.enabled = false;
     this.depthOfFieldPass.sceneDepth = this.renderPass.depthTexture;
     this.composer.addPass(this.depthOfFieldPass);
@@ -501,22 +501,16 @@ export class StageManager {
     this.composer.addPass(this.lensDroplets.pass);
 
     // パラ（背景の空気の色をキャラの上だけにグラデーションで重ねる。スクリーン合成なので sRGB で行う）
-    this.paraPass = new ShaderPass(ParaShader);
-    this.paraPass.uniforms['tMask'].value = characterMask;
+    this.paraPass = new ParaPass();
+    this.paraPass.uniforms.tMask.value = characterMask;
     this.composer.addPass(this.paraPass);
 
-    // 色調補正（明度0.5基準の影/ハイライト判定・S字カーブ）とSMAAのエッジ検出は sRGB 値を前提にする
+    // 色調補正（明度0.5基準の影/ハイライト判定・S字カーブ）と人物の仕上げ（逆光リム・明部上限）を 1 パスで行う
     this.cinematicAnimePass = new ShaderPass(CinematicAnimeShader);
     this.cinematicAnimePass.uniforms['uResolution'].value.set(targetW, targetH);
+    this.cinematicAnimePass.uniforms['tMask'].value = characterMask;
+    this.cinematicAnimePass.uniforms['tEye'].value = this.visibleEyeMask.texture;
     this.composer.addPass(this.cinematicAnimePass);
-
-    // 人物の仕上げ（逆光のリムライトと明部の上限）。色調補正の後の表示用の値で行う
-    this.characterFinishPass = new ShaderPass(CharacterFinishShader);
-    this.characterFinishPass.uniforms['tMask'].value = characterMask;
-    this.characterFinishPass.uniforms['tEye'].value = this.visibleEyeMask.texture;
-    this.characterFinishPass.uniforms['uResolution'].value.set(targetW, targetH);
-    this.characterFinishPass.enabled = false;
-    this.composer.addPass(this.characterFinishPass);
 
     // マスクで人物を仕上げてから歪める。通常のカットではパスごと飛ばす。
     this.fisheyePass = new ShaderPass(FisheyeShader);
@@ -639,7 +633,7 @@ export class StageManager {
     }
 
     // 5.5 パラ（divine のように逆光シルエットを締めたい時間帯はプリセットで切る）
-    applyParaParams(this.paraPass.uniforms as typeof ParaShader.uniforms, {
+    applyParaParams(this.paraPass.uniforms, {
       ...DEFAULT_PARA_PARAMS,
       ...preset.postProcessing.para,
     });
@@ -887,7 +881,11 @@ export class StageManager {
     // 3D背景の影の面は、地面の影と同じ色・濃さで塗る
     const shade = new THREE.Color(1, 1, 1);
     if (shadow) shade.lerp(new THREE.Color(shadow.color), shadow.opacity);
-    setCelLight(this.directionalLight.position, shade);
+    // 植栽・切り抜き立面向けの時間帯ティント（昼はほぼ白、夕方・夜は太陽光の色味と暗さを軽く寄せる）
+    const tint = new THREE.Color(1, 1, 1).lerp(this.directionalLight.color, 0.32);
+    const tintLum = THREE.MathUtils.clamp(0.45 + 0.55 * Math.min(this.directionalLight.intensity / 1.5, 1), 0.45, 1.0);
+    tint.multiplyScalar(tintLum);
+    setCelLight(this.directionalLight.position, shade, tint);
     if (shadow) {
       this.groundShadow.material.color.set(shadow.color);
       this.groundShadow.material.opacity = shadow.opacity;
@@ -996,7 +994,7 @@ export class StageManager {
     this.characterGlowPass.uniforms.uRadius.value = glow?.radius ?? 0.012;
     this.characterGlowPass.uniforms.uThreshold.value = glow?.threshold ?? 0.16;
     this.characterGlowPass.uniforms.uEyeCare.value = eyeCare ? 1 : 0;
-    const finish = this.characterFinishPass.uniforms;
+    const finish = this.cinematicAnimePass.uniforms;
     finish['uEyeCare'].value = eyeCare ? 1 : 0;
     const cap = look?.highlightCap;
     finish['uCapKnee'].value = cap ? cap - 0.12 : 1;
@@ -2228,7 +2226,6 @@ export class StageManager {
     this.hairShadow.setSize(targetW, targetH);
     this.characterMask.setSize(targetW, targetH);
     this.eyeMask.setSize(targetW, targetH);
-    this.characterFinishPass.uniforms['uResolution'].value.set(targetW, targetH);
     this.rimBloomPass.setSize(targetW, targetH);
     this.lightWrapPass.uniforms['uResolution'].value.set(targetW, targetH);
     this.screenEffects?.resize();
@@ -2331,6 +2328,20 @@ export class StageManager {
 
       // 太陽光の視線空間における入射方向（4x MSAA による 3D 指向性アニメリムライト用）
       this.camera.updateMatrixWorld();
+      const focusKey = this.focusId();
+      let focusHeadFrac = 0;
+      let maxHeadFrac = 0;
+      this.loadedAvatars.forEach((avatar, id) => {
+        if (!avatar.vrm?.scene.visible) return;
+        const frac = avatar.updateOutlineScreenScale(this.camera);
+        if (id === focusKey) focusHeadFrac = frac;
+        if (frac > maxHeadFrac) maxHeadFrac = frac;
+      });
+      const activeHeadFrac = focusHeadFrac > 0 ? focusHeadFrac : (maxHeadFrac > 0 ? maxHeadFrac : 0.28);
+      const rimScale = THREE.MathUtils.clamp(Math.pow(Math.max(activeHeadFrac / 0.28, 0.01), 0.3), 0.75, 1.25);
+      SILHOUETTE_RIM_UNIFORMS.uSilRimScale.value = rimScale;
+      this.rimBloomPass.uniforms.uRadiusPx.value = 1.4 * rimScale;
+
       const lightView = this.directionalLight.position.clone().normalize().transformDirection(this.camera.matrixWorldInverse);
       const lx = lightView.x;
       const ly = lightView.y;
@@ -2343,19 +2354,21 @@ export class StageManager {
 
       // 逆光の特殊背景リムライト（3D花火など scene.userData.characterRim がある場合のみ）
       const rim = this.scene.userData.characterRim as CharacterRim | undefined;
-      const finish = this.characterFinishPass.uniforms;
+      const finish = this.cinematicAnimePass.uniforms;
       if (rim) {
         (finish['uRimColor'].value as THREE.Color).copy(rim.color);
         (finish['uRimScreen'].value as THREE.Vector2).copy(rim.screen);
       } else {
         (finish['uRimColor'].value as THREE.Color).setRGB(0, 0, 0);
       }
-      this.characterFinishPass.enabled = (finish['uRimColor'].value as THREE.Color).getHex() > 0 || finish['uCapTop'].value < 1;
+      const finishEnabled = (finish['uRimColor'].value as THREE.Color).getHex() > 0 || finish['uCapTop'].value < 1;
+      finish['uFinishEnabled'].value = finishEnabled ? 1 : 0;
+      finish['uRimWidth'].value = 4.5 * rimScale;
       // 切ってあるときは画面をそのまま写すだけなので、パスごと飛ばす
       this.lightWrapPass.enabled = this.lightWrapPass.uniforms['uEnabled'].value > 0.5;
-      this.paraPass.enabled = this.paraPass.uniforms['uEnabled'].value > 0.5;
-      const masked = this.characterFinishPass.enabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled || this.lightWrapPass.uniforms['uEnabled'].value > 0.5 || this.paraPass.uniforms['uEnabled'].value > 0.5 || this.godRaysPass.enabled;
-      const needEyeMask = this.characterFinishPass.enabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled;
+      this.paraPass.enabled = this.paraPass.uniforms.uEnabled.value > 0.5;
+      const masked = finishEnabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled || this.lightWrapPass.uniforms['uEnabled'].value > 0.5 || this.paraPass.enabled || this.godRaysPass.enabled;
+      const needEyeMask = finishEnabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled;
       this.visibleCharacterMask.enabled = masked;
       this.visibleEyeMask.enabled = needEyeMask;
       // キャラのマスクは外形のリムライト（shader/SilhouetteRim.ts）が毎フレーム読むので、常に描く
@@ -2403,6 +2416,7 @@ export class StageManager {
     this.depthOfFieldPass.dispose();
     this.wetReflectionPass.dispose();
     this.highlightShoulderPass.dispose();
+    this.paraPass.dispose();
     this.fisheyePass.dispose();
     this.rimBloomPass.dispose();
     releaseSilhouetteRimMask(this.characterMask.texture);

@@ -38,6 +38,7 @@ export type ToonShaderController = {
   patched: ReadonlyArray<string>;
   updateMaterialStyle: (kind: 'body' | 'hair' | 'cloth', params: Partial<MaterialStyleParams>) => void;
   updateOutline: (params: Partial<OutlineStyle>) => void;
+  setOutlineScreenScale: (scale: number) => void;
   updateEyeGlow: (cfg?: EyeGlowConfig) => void;
   updateBottomGradient: (cfg?: Partial<BottomGradientConfig>) => void;
   applyFullConfig: (config: ToonShaderAvatarConfig) => void;
@@ -395,16 +396,19 @@ export function applyToonShader(
         material.userData.uAutoLineWeight = {
           value: (activeConfig?.outline?.autoLineWeight ?? true) ? 1.0 : 0.0,
         };
+        material.userData.uOutlineScreenScale = { value: 1.0 };
         const prevOutlineCompile = material.onBeforeCompile;
         material.onBeforeCompile = (shader, renderer) => {
           if (prevOutlineCompile) {
             prevOutlineCompile(shader, renderer);
           }
           shader.uniforms.uAutoLineWeight = material.userData.uAutoLineWeight;
+          shader.uniforms.uOutlineScreenScale = material.userData.uOutlineScreenScale;
           shader.vertexShader = shader.vertexShader.replace(
             'void main() {',
             /* glsl */ `
             uniform float uAutoLineWeight;
+            uniform float uOutlineScreenScale;
             void main() {
             `
           );
@@ -412,10 +416,10 @@ export function applyToonShader(
             'vec3 outlineOffset = outlineWidthFactor * worldNormalLength * objectNormal;',
             /* glsl */ `
             vec3 outlineOffset = outlineWidthFactor * worldNormalLength * objectNormal;
-            // Auto Line Weight: View Angle silhouette modulation
+            // Auto Line Weight: View Angle silhouette modulation + screen-projection clamp
             float dotNV = abs(dot(normalize(transformedNormal), vec3(0.0, 0.0, 1.0)));
             float lineWeight = mix(1.0, 1.0 + (1.0 - dotNV) * 0.45, uAutoLineWeight);
-            outlineOffset *= lineWeight;
+            outlineOffset *= min(lineWeight * uOutlineScreenScale, 1.6);
             `
           );
           // 輪郭線を視線方向の奥へずらす。肘・膝を深く曲げた凹みで、殻が向かいの面を突き抜けて
@@ -1072,6 +1076,14 @@ export function applyToonShader(
       setupEyeMaterials();
     },
     updateOutline: applyOutline,
+    setOutlineScreenScale: (scale) => {
+      allMToonMaterials.forEach(({ material }) => {
+        if (!material.isOutline) return;
+        if (material.userData.uOutlineScreenScale) {
+          material.userData.uOutlineScreenScale.value = scale;
+        }
+      });
+    },
     updateEyeGlow: (cfg) => {
       applyEyeGlow(cfg);
       setupEyeMaterials();
