@@ -7,6 +7,7 @@ import { SkinnedCloth, type SkinnedClothOptions } from './SkinnedCloth';
  *
  * - 布にするメッシュ：揺れもの（スプリングボーン）に付いた頂点を持つ部品のうち、材質名で分かればそれ
  *   （bottoms / skirt / onepiece / dress）、なければ形（下 1/3 に開いた裾があり、裾がいちばん広い）で選ぶ
+ *   （材質名で分かっても下 1/3 に開いた裾がない前開きの白衣などは、布になる頂点がいちばん多いものを選ぶ）
  * - 布にする骨：腰（か脚）から生えている揺れものと、脚の骨。袖・胸・髪の揺れものは、いちばん近い人体の骨が
  *   腕・胸・頭なので入らない（ワンピースの袖まで布にすると、腕に当たり判定がないので袖が腕を抜けて落ちる）。
  *   脚の骨を入れるのは、VRoid のスカートは上のほうに太ももの重みが少し入っていて、そこを脚に付けたまま留めると、
@@ -35,6 +36,24 @@ export type VrmSkirtOptions = Partial<Omit<SkinnedClothOptions, 'mesh' | 'clothB
 
 const PIECE_BONES = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'];
 const LOWER_BODY = ['hips', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'];
+
+/**
+ * 材質名でスカートと分かる部品に、下 1/3 の開いた裾が見つからないとき（前開きの白衣・コートなど。裾と前の縁と
+ * 腰の縁が一続きの縁になり、縁の高さが部品の中ほどになる）の選び方。名前を信じて、布になる頂点がいちばん多い部品を選ぶ。
+ * 細い帯（ベルト）は pickSkirt と同じく、全体の高さの 15% 未満なら外す
+ */
+function mostCloth<P extends { box: THREE.Box3; free: Float32Array | null }>(named: P[], parts: P[], freeFrom: number): P | null {
+  const all = new THREE.Box3();
+  for (const p of parts) all.union(p.box);
+  const H = all.max.y - all.min.y;
+  let best: P | null = null, bestCount = 0;
+  for (const p of named) {
+    if (p.box.max.y - p.box.min.y < 0.15 * H) continue;
+    const count = p.free ? p.free.reduce((n, f) => n + (f >= freeFrom ? 1 : 0), 0) : 0;
+    if (count > bestCount) { best = p; bestCount = count; }
+  }
+  return best;
+}
 
 /** 読み込み直後（モーションを当てる前の姿勢）に呼ぶ。布にできるスカートがなければ null（理由は SkinnedCloth.skipped） */
 export function createVrmSkirt(vrm: VrmLike, options: VrmSkirtOptions = {}): SkinnedCloth | null {
@@ -65,7 +84,7 @@ export function createVrmSkirt(vrm: VrmLike, options: VrmSkirtOptions = {}): Ski
   const named = withCloth.filter((p) => /bottoms|skirt|onepiece|dress/i.test(`${p.materialName} ${p.name}`));
   const sk = options.skirt
     ? parts.find((p) => p.name === options.skirt || p.materialName === options.skirt)
-    : pickSkirt(named) ?? pickSkirt(withCloth);
+    : pickSkirt(named) ?? mostCloth(named, parts, freeFrom) ?? pickSkirt(withCloth);
   if (!sk) return skip(`スカートの部品が見つからない（揺れものに付いた部品：${withCloth.map((p) => p.materialName || p.name).join('、') || 'なし'}）`);
 
   const { skirt: _skirt, ...rest } = options;
