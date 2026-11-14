@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { describeParts, pickSkirt, pickColliders } from './parts';
-import { SkinnedCloth, type SkinnedClothOptions } from './SkinnedCloth';
+import { SkinnedCloth, type SkinnedClothOptions, type ClothWind } from './SkinnedCloth';
+import { createVrmKnit } from './knit';
 
 /**
  * VRM のスカート（ワンピースの裾も）を布にする。SkinnedCloth へ渡すものを、VRM の決まりごとから埋める：
@@ -32,6 +33,10 @@ export interface VrmLike {
 export type VrmSkirtOptions = Partial<Omit<SkinnedClothOptions, 'mesh' | 'clothBones' | 'reference' | 'colliders' | 'root'>> & {
   /** スカートの部品（メッシュ名か材質名）。省くと自動で選ぶ */
   skirt?: string;
+  /** 当たる体から外すメッシュ（ほかの布。布は形が変わるので、固い体としては当てない） */
+  notColliders?: THREE.Object3D[];
+  /** 当たる体を切る骨（人体の骨の名前）。省くと腰・背骨・太もも・すね */
+  pieceBones?: string[];
 };
 
 const PIECE_BONES = ['hips', 'spine', 'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg'];
@@ -87,7 +92,7 @@ export function createVrmSkirt(vrm: VrmLike, options: VrmSkirtOptions = {}): Ski
     : pickSkirt(named) ?? mostCloth(named, parts, freeFrom) ?? pickSkirt(withCloth);
   if (!sk) return skip(`スカートの部品が見つからない（揺れものに付いた部品：${withCloth.map((p) => p.materialName || p.name).join('、') || 'なし'}）`);
 
-  const { skirt: _skirt, ...rest } = options;
+  const { skirt: _skirt, notColliders = [], pieceBones = PIECE_BONES, ...rest } = options;
   return SkinnedCloth.create({
     ...rest,
     mesh: sk.mesh,
@@ -95,9 +100,63 @@ export function createVrmSkirt(vrm: VrmLike, options: VrmSkirtOptions = {}): Ski
     clothBones,
     reference: hips,
     colliders: {
-      meshes: pickColliders(parts, sk).map((p) => p.mesh),
-      bones: PIECE_BONES.map(bone).filter((b): b is THREE.Object3D => !!b),
+      meshes: pickColliders(parts, sk).map((p) => p.mesh).filter((m) => !notColliders.includes(m)),
+      bones: pieceBones.map(bone).filter((b): b is THREE.Object3D => !!b),
       stopBones: humanBones,
     },
   });
+}
+
+/** 布にした服 1 着。スカート（SkinnedCloth）も上着（knit）もこの形で扱える */
+export interface GarmentCloth {
+  mesh: THREE.SkinnedMesh;
+  info: { mesh?: string; [key: string]: unknown };
+  update(delta: number, wind?: ClothWind | null): void;
+  setEnabled(enabled: boolean): void;
+  dispose(): void;
+}
+
+/**
+ * VRM の服のうち布にできるものを全部布にする：スカート（createVrmSkirt）と、上着（材質名が tops / coat / jacket /
+ * outer / hoodie / knit）。上着は knit.ts の方式：留める輪がなく、肩と腕の上の点を「支え」にして、ほかは体への当たりと
+ * 布の長さで止める。支えは体がひっくり返ると外れる。布どうしは当てない。
+ * 読み込み直後（モーションを当てる前の姿勢）に呼ぶ。
+ */
+export function createVrmGarments(vrm: VrmLike, options: VrmSkirtOptions = {}, knitOptions: Record<string, unknown> = {}): GarmentCloth[] {
+  const cloths: GarmentCloth[] = [];
+  const skirt = createVrmSkirt(vrm, options);
+  if (skirt) cloths.push(skirt);
+  if (!vrm.humanoid) return cloths;
+  const tops: THREE.SkinnedMesh[] = [];
+  const materialName = (m: THREE.Mesh): string => (Array.isArray(m.material) ? m.material[0] : m.material)?.name ?? '';
+  vrm.scene.traverse((object) => {
+    const m = object as THREE.SkinnedMesh;
+    if (m.isSkinnedMesh && m !== skirt?.mesh && m.geometry.index && /tops|coat|jacket|outer|hoodie|knit/i.test(`${materialName(m)} ${m.name}`)) tops.push(m);
+  });
+  // 上着の裾はスカートの布の外側に乗る（knit.ts の readSkirt が読む形：布の点と、スカートの軸の位置）
+  let under: { cloth: unknown; pivot: [number, number] } | null = null;
+  if (skirt) {
+    const c = skirt.cloth as unknown as { X0: ArrayLike<number>; pinned: ArrayLike<number> };
+    let px = 0, pz = 0;
+    for (let q = 0; q < c.pinned.length; q++) { px += c.X0[c.pinned[q] * 3]; pz += c.X0[c.pinned[q] * 3 + 2]; }
+    under = { cloth: skirt.cloth, pivot: [px / Math.max(1, c.pinned.length), pz / Math.max(1, c.pinned.length)] };
+  }
+  for (const top of tops) {
+    try {
+      // knit.ts はまだ型を付けていない
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const knit = (createVrmKnit as unknown as (vrm: VrmLike, options: object) => any)(vrm, { part: top, bodyFilter: (p: { materialName: string }) => /(body|face).*skin|^Human\.body/i.test(p.materialName), opts: knitOptions });
+      cloths.push({
+        mesh: knit.mesh,
+        info: { ...knit.info, mesh: materialName(top) || top.name },
+        update: (delta: number) => knit.update(delta, under),
+        setEnabled: knit.setEnabled,
+        dispose: knit.dispose,
+        knit,
+      } as unknown as GarmentCloth);
+    } catch (error) {
+      console.warn('上着を布にできなかった', error);
+    }
+  }
+  return cloths;
 }

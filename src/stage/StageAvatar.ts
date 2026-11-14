@@ -13,8 +13,8 @@ import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
-import { createVrmSkirt } from '../cloth/vrm';
-import type { SkinnedCloth, ClothWind } from '../cloth/SkinnedCloth';
+import { createVrmGarments, type GarmentCloth } from '../cloth/vrm';
+import { SkinnedCloth, type ClothWind } from '../cloth/SkinnedCloth';
 import { WetDrips } from '../avatar/wetDrips';
 import { AvatarEffects } from './AvatarEffects';
 import { idleMotionUrl, resolveAssetUrl } from '../utils/path';
@@ -300,6 +300,10 @@ export class StageAvatar {
   private clothDentEnabled: boolean;
   /** スカートの布（cloth/）。布にできるスカートがない・切のときは null */
   public skirtCloth: SkinnedCloth | null = null;
+  /** スカート以外で布にした服（裾に揺れものが入った上着など） */
+  public otherCloths: GarmentCloth[] = [];
+  /** 上着の布（cloth/knit.ts）の設定を試すとき用。作る前に入れる */
+  public static knitOptions: Record<string, unknown> = {};
   private skirtClothEnabled: boolean;
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
@@ -423,7 +427,7 @@ export class StageAvatar {
 
           // 1.5 スカートの布。形を測る処理（へこみ・濡れ）の後、モーションを当てる前の姿勢で作る。
           // スカートのジオメトリを差し替えるので、スムース法線の後
-          if (this.skirtClothEnabled) this.skirtCloth = createVrmSkirt(vrm);
+          if (this.skirtClothEnabled) this.createCloths(vrm);
 
           // 2. メッシュのシャドウとカリング解除
           vrm.scene.traverse((obj) => {
@@ -601,14 +605,22 @@ export class StageAvatar {
     return { velocity: { x: x * speed, y: y * speed, z: z * speed }, gust: wind.gust };
   }
 
+  /** 布にできる服（スカートと、裾に揺れものが入った上着）を布にする */
+  private createCloths(vrm: VRM): void {
+    const cloths = createVrmGarments(vrm, {}, StageAvatar.knitOptions);
+    this.skirtCloth = (cloths.find((c) => c instanceof SkinnedCloth) as SkinnedCloth | undefined) ?? null;
+    this.otherCloths = cloths.filter((c) => c !== this.skirtCloth);
+  }
+
   /** スカートを布として動かすかを切り替える。切ると揺れものの骨で動くスカートに戻る */
   public setSkirtCloth(enabled: boolean): void {
     this.skirtClothEnabled = enabled;
     if (enabled && !this.skirtCloth && this.vrm) {
       // 布は読み込み時の姿勢（T ポーズ）の形を覚える。途中から入れるときは、今の姿勢の形が元になる
-      this.skirtCloth = createVrmSkirt(this.vrm);
+      this.createCloths(this.vrm);
     }
     this.skirtCloth?.setEnabled(enabled);
+    for (const cloth of this.otherCloths) cloth.setEnabled(enabled);
   }
 
   public setMotionSpeed(speed: number): void {
@@ -886,7 +898,9 @@ export class StageAvatar {
     );
 
     // 4.4 スカートの布（姿勢が決まってから。濡れた服は重いので風に揺らさない）
-    this.skirtCloth?.update(delta, this.wetnessTarget > 0 ? null : this.clothWind());
+    const clothWind = this.wetnessTarget > 0 ? null : this.clothWind();
+    this.skirtCloth?.update(delta, clothWind);
+    for (const cloth of this.otherCloths) cloth.update(delta, clothWind);
 
     // 4.5 手に押されてスカートがへこむ（腕と揺れものが決まってから）
     this.clothDent?.update();
@@ -999,6 +1013,8 @@ export class StageAvatar {
     this.wetDrips = null;
     this.skirtCloth?.dispose();
     this.skirtCloth = null;
+    for (const cloth of this.otherCloths) cloth.dispose();
+    this.otherCloths = [];
     this.footContactShadow?.dispose();
     this.footContactShadow = null;
     if (this.vrm) {

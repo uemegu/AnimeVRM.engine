@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { StageManager } from '../../src/stage/StageManager';
+import { StageAvatar } from '../../src/stage/StageAvatar';
 import { registerEnvironment } from '../../src/stage/environments';
 import { configureAssets } from '../../src/utils/path';
 import type { LocationVisualPreset, TimeOfDayPreset } from '../../src/schema/visual';
@@ -45,6 +46,9 @@ const floor: LocationVisualPreset = {
 
 const params = new URLSearchParams(location.search);
 const motion = params.get('motion') ?? undefined;
+
+// ?knitopts={...}：上着の布（src/cloth/knit.ts）の設定を試す
+StageAvatar.knitOptions = JSON.parse(params.get('knitopts') ?? '{}');
 
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const stage = new StageManager({

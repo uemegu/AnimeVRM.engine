@@ -20,6 +20,8 @@ export interface DistanceGrid {
   sample(x: number, y: number, z: number, out?: Vec3Out): number;
   dims: [number, number, number];
   band: number;
+  /** the grid's box in the mesh's own space: [min x, y, z, max x, y, z] (outside it `sample` returns far) */
+  box: [number, number, number, number, number, number];
 }
 
 export function weld(position: ArrayLike<number>, index: ArrayLike<number>): WeldedMesh & { map: Uint32Array } {
@@ -161,5 +163,5 @@ export function buildSDF(mesh: WeldedMesh, { min, max, cell = 0.006, band = 0.04
     }
     return y0 + (y1 - y0) * tz;
   }
-  return { sample, dims: [nx, ny, nz], band };
+  return { sample, dims: [nx, ny, nz], band, box: [min[0], min[1], min[2], min[0] + (nx - 1) * cell, min[1] + (ny - 1) * cell, min[2] + (nz - 1) * cell] };
 }

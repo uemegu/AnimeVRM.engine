@@ -128,7 +128,7 @@ export class SkinnedCloth {
 
   private constructor(
     private readonly root: THREE.Object3D,
-    private readonly mesh: THREE.SkinnedMesh,
+    public readonly mesh: THREE.SkinnedMesh,
     private readonly original: THREE.BufferGeometry,
     private readonly geometry: THREE.BufferGeometry,
     cloth: Cloth,
