@@ -346,6 +346,7 @@ export class SkinnedCloth {
   private readRig(): void {
     this.root.updateMatrixWorld(true);
     this.mesh.skeleton.update();
+    this.rigVersion++;
     const frames = this.cloth.frames;
     to12(_m4.multiplyMatrices(this.hips.matrixWorld, this.hipsRestInverse), frames.ref.M);
     for (let q = 0; q < this.pieceBones.length; q++) to12(this.pieceBones[q].matrixWorld, frames.colliders[q].M);
@@ -390,6 +391,12 @@ export class SkinnedCloth {
   /**
    * 1フレーム進める。姿勢が決まった後（モーションや揺れものの更新の後）に呼ぶ。wind は null で無風
    */
+  /**
+   * 骨の行列を更新し直すたびに 1 増える。同じフレームで後から更新するほかの布（上着）が、
+   * 行列の更新を省いてよいかを知るために見る（cloth/vrm.ts）
+   */
+  public rigVersion = 0;
+
   update(delta: number, wind?: ClothWind | null): void {
     if (!this.enabled) return;
     this.time += delta;

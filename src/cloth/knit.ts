@@ -1178,10 +1178,13 @@ export function createVrmKnit(vrm, { part = 'knit', bodyFilter = (p) => /^Human\
     }
     posAttr.needsUpdate = true; nrmAttr.needsUpdate = true;
   }
-  function readRig() {
-    vrm.scene.updateMatrixWorld(true); skeleton.update();
+  // `fresh`: a skeleton whose bones' matrices (the whole scene's) have just been brought up to date by someone else in this
+  // frame (the skirt's cloth, updated right before): the forced update of every matrix in the scene is then not repeated
+  function readRig(fresh = null) {
+    if (!fresh) vrm.scene.updateMatrixWorld(true);
+    if (skeleton !== fresh) skeleton.update();
     corrNow = corr ? corr(oldGeometry) : null; useCorr = !!corrNow;
-    for (const m of bodies) if (m.skeleton !== skeleton) m.skeleton.update();
+    for (const m of bodies) if (m.skeleton !== skeleton && m.skeleton !== fresh) m.skeleton.update();
     readPlanes();
     for (const col of cols) to12(col.bone.matrixWorld, col.M);
     for (let i = 0; i < nf; i++) pose(repF[i], tf, i * 3);
@@ -1219,9 +1222,9 @@ export function createVrmKnit(vrm, { part = 'knit', bodyFilter = (p) => /^Human\
     fine(); normals(); write();
   }
   const STEP = 1 / 60; let acc = 0;
-  function update(dt, skirt = null) {
+  function update(dt, skirt = null, fresh = null) {
     const t0 = performance.now();
-    readRig(); readSkirt(skirt);
+    readRig(fresh); readSkirt(skirt);
     stats.rig += (performance.now() - t0 - stats.rig) * 0.1;
     // always in steps of 1/60 s, whatever the frame rate (two at most a frame; none on a frame that comes early): how the
     // knit moved depended on the frame's length (at 24 frames a second the hem lay still, near 60 it never did)

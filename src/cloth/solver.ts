@@ -506,6 +506,36 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
   }
 
+  // ---- which pieces of the body each point is tested against: chosen every CAND_EVERY substeps, not all of them every
+  // substep (2026-11-15: 1,097 points x 6 pieces x 16 substeps = 105,000 lookups a frame, most of them for a piece nowhere
+  // near the point). A piece is kept for a point if the point, in the piece's own space now or CAND_EVERY substeps ahead,
+  // is inside the piece's grid grown by how far a point can travel in that time (its speed is limited) plus a little.
+  // Outside its grid a piece reports "far", so leaving it out changes nothing: the cloth's motion is the same to the bit
+  // (checked on a breakdance and a walk, scratch/animevrm-cloth/fingerprint.mjs in 360toAvator).
+  const CAND_EVERY = 4, NC = Math.max(1, cols.length);
+  const candN = new Uint8Array(n), cand = new Uint8Array(n * NC), touching = new Uint8Array(n * NC), aheadM = I12(), aheadInv = cols.map(() => I12());
+  function findCands(s: number, ns: number, h: number): void {
+    const reach = grab ? Infinity : o.maxSpeed * CAND_EVERY * h + 0.015, a2 = Math.min(1, (s + CAND_EVERY) / ns);
+    for (let q = 0; q < cols.length; q++) { lerp12(cols[q].prev, cols[q].M, a2, aheadM); inv12(aheadM, aheadInv[q]); }
+    for (let i = 0; i < n; i++) {
+      let cn = 0;
+      if (w[i]) {
+        const k = i * 3, px = x[k], py = x[k + 1], pz = x[k + 2], base = i * NC;
+        for (let q = 0; q < cols.length; q++) {
+          const b = cols[q].sdf.box, m = cols[q].inv, m2 = aheadInv[q];
+          const ax = m[0] * px + m[1] * py + m[2] * pz + m[3], bx = m2[0] * px + m2[1] * py + m2[2] * pz + m2[3];
+          if ((ax < bx ? ax : bx) > b[3] + reach || (ax > bx ? ax : bx) < b[0] - reach) continue;
+          const ay = m[4] * px + m[5] * py + m[6] * pz + m[7], by = m2[4] * px + m2[5] * py + m2[6] * pz + m2[7];
+          if ((ay < by ? ay : by) > b[4] + reach || (ay > by ? ay : by) < b[1] - reach) continue;
+          const az = m[8] * px + m[9] * py + m[10] * pz + m[11], bz = m2[8] * px + m2[9] * py + m2[10] * pz + m2[11];
+          if ((az < bz ? az : bz) > b[5] + reach || (az > bz ? az : bz) < b[2] - reach) continue;
+          cand[base + cn++] = q;
+        }
+      }
+      candN[i] = cn;
+    }
+  }
+
   function step(dt: number): void {
     const t0 = performance.now();
     const ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), aB = o.bend / (h * h), aL = o.shape / (h * h), aC = o.crease / (h * h);
@@ -519,6 +549,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       const a = (s + 1) / ns;
       lerp12(ref.prev, ref.M, a, ref.cur); inv12(ref.cur, ref.inv);
       for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); lerp12(col.prev, col.M, a, col.cur); inv12(col.cur, col.inv); }
+      if (s % CAND_EVERY === 0) findCands(s, ns, h);
       // predict
       for (let i = 0; i < n; i++) {
         const k = i * 3;
@@ -561,12 +592,16 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
         let dx = x[k] - x[p], dy = x[k + 1] - x[p + 1], dz = x[k + 2] - x[p + 2];
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d > tLen[i]) { const r = tLen[i] / d; x[k] = x[p] + dx * r; x[k + 1] = x[p + 1] + dy * r; x[k + 2] = x[p + 2] + dz * r; }
-        for (let q = 0; q < cols.length; q++) {
-          const col = cols[q], m = col.inv, px = x[k], py = x[k + 1], pz = x[k + 2];
+        for (let e = 0, cn = candN[i], base = i * NC; e < cn; e++) {
+          const q = cand[base + e], col = cols[q], m = col.inv, px = x[k], py = x[k + 1], pz = x[k + 2];
           // into the piece's own space
           const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
-          if (col.sdf.sample(lx, ly, lz) >= col.margin[i]) continue;
-          const sd = col.sdf.sample(lx, ly, lz, g), c = col.cur;
+          // a point that touched this piece in the substep before most likely still does: distance and direction in one
+          // lookup. Otherwise the distance alone first, and the direction only if it touches
+          let sd: number;
+          if (touching[base + q]) { sd = col.sdf.sample(lx, ly, lz, g); if (sd >= col.margin[i]) { touching[base + q] = 0; continue; } }
+          else { if (col.sdf.sample(lx, ly, lz) >= col.margin[i]) continue; sd = col.sdf.sample(lx, ly, lz, g); touching[base + q] = 1; }
+          const c = col.cur;
           let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
           gx /= gl; gy /= gl; gz /= gl;

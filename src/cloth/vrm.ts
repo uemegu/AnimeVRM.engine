@@ -149,7 +149,16 @@ export function createVrmGarments(vrm: VrmLike, options: VrmSkirtOptions = {}, k
       cloths.push({
         mesh: knit.mesh,
         info: { ...knit.info, mesh: materialName(top) || top.name },
-        update: (delta: number) => knit.update(delta, under),
+        // スカートの布がこのフレームで骨の行列を更新し直していたら、上着は同じ更新を繰り返さない。
+        // 配列の順（スカート→上着）で続けて update を呼ぶこと：間に骨を動かすと、上着が古い行列を使う
+        update: (() => {
+          let seen = -1;
+          return (delta: number) => {
+            const fresh = skirt && skirt.rigVersion !== seen ? skirt.mesh.skeleton : null;
+            if (skirt) seen = skirt.rigVersion;
+            knit.update(delta, under, fresh);
+          };
+        })(),
         setEnabled: knit.setEnabled,
         dispose: knit.dispose,
         knit,
