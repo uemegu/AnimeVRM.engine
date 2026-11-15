@@ -1,7 +1,7 @@
 import { FocusLinesOverlay } from '../effects/FocusLinesOverlay';
 
 /** 画面の切り替え演出（fade_black = 暗転してから映す、black = 暗転したまま、white = 白く飛ばしたまま、eyelid_close = 瞼を閉じる、eyelid_blink = まばたき） */
-export type ScreenTransitionKind = 'fade_black' | 'black' | 'white' | 'eyelid_close' | 'eyelid_blink';
+export type ScreenTransitionKind = 'fade_black' | 'black' | 'white' | 'eyelid_close' | 'eyelid_blink' | 'memory';
 
 const EYELID_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 const EYELID_CLOSE_SEC = 0.95;
@@ -122,6 +122,21 @@ export class ScreenEffects {
       return;
     }
     if (instant) return;
+    if (kind === 'memory') {
+      // 回想への出入り: 白くにじんだところから、絵が落ち着くのに合わせて晴れる（波打ちは StageManager の波ガラスが行う）
+      this.blackout.style.background = '#fff';
+      this.blackout.style.opacity = '0.75';
+      const id = this.transitionId;
+      this.later(0.05, () => {
+        if (id !== this.transitionId) return;
+        this.blackout.style.transition = 'opacity 1.4s ease-out';
+        this.blackout.style.opacity = '0';
+      });
+      this.later(1.5, () => {
+        if (id === this.transitionId) this.blackout.style.background = '#000';
+      });
+      return;
+    }
     if (kind === 'eyelid_blink') {
       // パチ、パチと2回まばたく
       [0, 0.42].forEach((start) => {

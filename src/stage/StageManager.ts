@@ -8,6 +8,8 @@ import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import type { LocationVisualPreset, TimeOfDayId, TimeOfDayPreset } from './visual';
 import { CharacterGlowPass } from '../postprocessing/CharacterGlow';
 import { type CharacterRim } from '../postprocessing/CharacterFinish';
+import { TransmittedLightPass } from '../postprocessing/TransmittedLight';
+import { WAVE_GLASS_KIND_INDEX, WAVE_GLASS_MEMORY, WaveGlassShader } from '../postprocessing/WaveGlass';
 import { HighlightShoulderShader } from '../postprocessing/HighlightShoulder';
 import { CinematicAnimeShader } from '../postprocessing/CinematicAnimeShader';
 import { FisheyeShader } from '../postprocessing/FisheyeShader';
@@ -30,6 +32,7 @@ import { ScreenEffects } from './ScreenEffects';
 import { RainGround } from './RainGround';
 import { StillImages, type CutinSettings, type StillImageSettings } from './StillImages';
 import type { EffectPresetName } from '../effects/text/types';
+import { WAVE_GLASS_TARGETS } from '../schema/stage';
 import { disposeEnvironment, loadEnvironment, placeEnvironment } from './environments';
 import { HairShadowRenderer } from '../shader/HairShadow';
 import { CharacterMaskRenderer, DEFAULT_LIGHT_WRAP_PARAMS, EYE_LAYER, LightWrapShader, VisibleMaskPass } from '../postprocessing/LightWrap';
@@ -167,6 +170,12 @@ export class StageManager {
   private hairShadow: HairShadowRenderer;
   // キャラのマスク（ライトラップ用）
   private characterMask: CharacterMaskRenderer;
+  private transmittedLightPass: TransmittedLightPass;
+  private waveGlassPass: ShaderPass;
+  /** 波ガラスの今の強さ（切り替えで急に歪まないよう、目標へ少しずつ寄せる） */
+  private waveGlassLevel = 0;
+  /** 回想の場面転換（memory）が始まってからの秒数。終わったら負 */
+  private memoryRippleTime = -1;
   private eyeMask: CharacterMaskRenderer;
   /** マスクから手前の物に隠れた所を除いたもの（マスクを読むパスはこちらを使う） */
   private visibleCharacterMask: VisibleMaskPass;
@@ -484,6 +493,11 @@ export class StageManager {
     this.composer.addPass(this.bloomPass);
 
     this.godRaysPass = new ShaderPass(GodRaysShader);
+    // 透過光（場所に登録した光源を発光させ、人物の上まで光をあふれさせる）
+    this.transmittedLightPass = new TransmittedLightPass(this.camera, this.renderPass.depthTexture);
+    this.transmittedLightPass.setSize(targetW, targetH);
+    this.composer.addPass(this.transmittedLightPass);
+
     this.godRaysPass.material.defines.NUM_SAMPLES = this.quality.godRaysSamples;
     // 光源として拾うのは背景だけ（服の明暗から筋が出ないように）
     this.godRaysPass.uniforms['tMask'].value = characterMask;
@@ -527,6 +541,13 @@ export class StageManager {
     this.lightWrapPass.uniforms['tHair'].value = this.hairShadow.depthTexture;
 
     // 8. ローダー & 多層背景メッシュ初期化
+    // 波ガラス（画面全体のゆらぎ）。指定のあるカットだけ通す
+    this.waveGlassPass = new ShaderPass(WaveGlassShader);
+    this.waveGlassPass.uniforms.uResolution.value.set(targetW, targetH);
+    this.waveGlassPass.uniforms.tMask.value = characterMask;
+    this.waveGlassPass.enabled = false;
+    this.composer.addPass(this.waveGlassPass);
+
     this.textureLoader = new THREE.TextureLoader();
     this.initLayeredMeshes();
 
@@ -651,6 +672,7 @@ export class StageManager {
     // このパスは OutputPass の後（sRGB 空間）で動くため、色は sRGB の値のまま渡す
     u.uShadowTint.value.set(c.colorGrading.shadowTint).convertLinearToSRGB();
     u.uHighlightTint.value.set(c.colorGrading.highlightTint).convertLinearToSRGB();
+    this.applyTransmittedLight();
     u.uGradingStrength.value = c.colorGrading.strength;
     u.uGradingContrast.value = c.colorGrading.contrast;
     u.uGamma.value = c.colorGrading.gamma;
@@ -990,6 +1012,12 @@ export class StageManager {
     const enabled = !!glow?.enabled || eyeCare;
     this.characterGlowPass.enabled = enabled;
     this.characterGlowPass.depthCapture.enabled = enabled;
+  /** 透過光は場所に登録した光源を、今の時間帯で出し分ける。カットの effects.transmittedLight は強さの倍率 */
+  private applyTransmittedLight(): void {
+    const lights = this.presets.locations[this.currentLocationId]?.transmittedLight;
+    this.transmittedLightPass.setLights(lights, this.currentTimeOfDay, this.effects.transmittedLight ?? 1);
+  }
+
     this.characterGlowPass.uniforms.uStrength.value = glow?.enabled ? glow.strength : 0;
     this.characterGlowPass.uniforms.uRadius.value = glow?.radius ?? 0.012;
     this.characterGlowPass.uniforms.uThreshold.value = glow?.threshold ?? 0.16;
@@ -1027,6 +1055,7 @@ export class StageManager {
       if (this.environment.object) {
         this.scene.remove(this.environment.object);
         disposeEnvironment(this.environment.model, this.environment.object);
+    this.applyTransmittedLight();
       }
       this.environment = null;
     }
@@ -1075,6 +1104,7 @@ export class StageManager {
     }
     this.updateCameraTarget();
   }
+    this.applyTransmittedLight();
 
   /** 立ち位置（座標の指定がなければ、場所の設定か既定のスロット位置） */
   private resolvePosition(member: StageCastMember): [number, number, number] {
@@ -1647,12 +1677,14 @@ export class StageManager {
   public setLanguage(language: 'ja' | 'en'): void {
     this.language = language;
   }
+    this.memoryRippleTime = cut?.screenTransition === 'memory' ? 0 : -1;
 
   public getQuality(): StageQuality {
     return { ...this.quality };
   }
 
   /**
+    this.memoryRippleTime = this.cut?.screenTransition === 'memory' ? 0 : -1;
    * カット内の時刻（ボイスの再生位置、なければカット開始からの秒数）。
    * seek が true なら、その時刻の状態へ飛ぶ（モーションも途中から）
    */
@@ -2234,6 +2266,8 @@ export class StageManager {
 
   /**
    * メインレンダリングループ
+    this.waveGlassPass.uniforms.uResolution.value.set(targetW, targetH);
+    this.transmittedLightPass.setSize(targetW, targetH);
    */
   private startRenderLoop(): void {
     const animate = () => {
@@ -2300,6 +2334,30 @@ export class StageManager {
         !!location?.environment && !location.isIndoor
       );
 
+      // 波ガラス。回想の場面転換の間は画面全体を波打たせ、1.8 秒かけて収める。それ以外はカットの指定（水中）へ 0.6 秒ほどで寄せる
+      const wave = this.waveGlassPass.uniforms;
+      const MEMORY_RIPPLE_SEC = 1.8;
+      if (this.memoryRippleTime >= 0) this.memoryRippleTime = this.memoryRippleTime + delta < MEMORY_RIPPLE_SEC ? this.memoryRippleTime + delta : -1;
+      const waveKind = this.effects.waveGlass;
+      const waveTarget = waveKind && waveKind !== 'off' ? this.effects.waveGlassStrength ?? 1 : 0;
+      this.waveGlassLevel += (waveTarget - this.waveGlassLevel) * Math.min(1, delta * 5);
+      if (Math.abs(waveTarget - this.waveGlassLevel) < 0.002) this.waveGlassLevel = waveTarget;
+      if (this.memoryRippleTime >= 0) {
+        wave.uKind.value = WAVE_GLASS_MEMORY;
+        wave.uStrength.value = 1.6 * (1 - this.memoryRippleTime / MEMORY_RIPPLE_SEC) ** 2;
+        wave.uTarget.value = 0;
+        wave.uArea.value.set(0, 0, 1, 1);
+      } else {
+        if (waveKind && waveKind !== 'off') wave.uKind.value = WAVE_GLASS_KIND_INDEX[waveKind];
+        wave.uStrength.value = this.waveGlassLevel;
+        const underwater = waveKind === 'underwater';
+        wave.uTarget.value = underwater ? WAVE_GLASS_TARGETS.indexOf(this.effects.waveGlassTarget ?? 'all') : 0;
+        const area = (underwater && this.effects.waveGlassArea) || [0, 0, 1, 1];
+        // 画面の上が 0 の指定を、シェーダーの座標（下が 0）に直す
+        wave.uArea.value.set(area[0], 1 - area[3], area[2], 1 - area[1]);
+      }
+      this.waveGlassPass.enabled = wave.uStrength.value > 0;
+      this.waveGlassPass.uniforms.uTime.value = elapsed;
       // 3. ゴッドレイ（サンシャフト）のユニフォーム更新。太陽が見えないときは描いても何も足されないので飛ばす
       this.godRaysPass.enabled = this.sunShaftsEnabled && sunInfo.sunVisibility > 0.001 && this.godRaysPass.uniforms['uExposure'].value > 0.001;
       if (this.godRaysPass.enabled) {
@@ -2367,7 +2425,7 @@ export class StageManager {
       // 切ってあるときは画面をそのまま写すだけなので、パスごと飛ばす
       this.lightWrapPass.enabled = this.lightWrapPass.uniforms['uEnabled'].value > 0.5;
       this.paraPass.enabled = this.paraPass.uniforms.uEnabled.value > 0.5;
-      const masked = finishEnabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled || this.lightWrapPass.uniforms['uEnabled'].value > 0.5 || this.paraPass.enabled || this.godRaysPass.enabled;
+      const masked = finishEnabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled || this.lightWrapPass.uniforms['uEnabled'].value > 0.5 || this.paraPass.enabled || this.godRaysPass.enabled || this.waveGlassPass.enabled;
       const needEyeMask = finishEnabled || this.characterGlowPass.enabled || this.rimBloomPass.enabled;
       this.visibleCharacterMask.enabled = masked;
       this.visibleEyeMask.enabled = needEyeMask;
@@ -2428,3 +2486,5 @@ export class StageManager {
     this.renderer.dispose();
   }
 }
+    this.waveGlassPass.dispose();
+    this.transmittedLightPass.dispose();

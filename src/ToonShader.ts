@@ -244,6 +244,8 @@ export function applyToonShader(
   const wetClothFrame = createWetClothFrame();
   let wetClothMesh: THREE.SkinnedMesh | null = null;
 
+  // 色トレス（輪郭線を、その場所の塗りの影色を暗く濃くした色にする）の強さ。このキャラの全マテリアルで共有する
+  const colorTraceUniform = { value: activeConfig?.outline?.colorTrace ?? 0 };
   const bottomGradientUniforms = {
     uBottomGradientEnabled: {
       value: (activeConfig?.bottomGradient?.enabled ?? true) ? 1.0 : 0.0,
@@ -463,6 +465,7 @@ export function applyToonShader(
           .replace('diffuseColor.rgb *= vColor;', 'diffuseColor.rgb *= vColor.rgb;')
           .replace('material.shadeColor.rgb *= vColor;', 'material.shadeColor.rgb *= vColor.rgb;');
 
+        shader.uniforms.uColorTrace = colorTraceUniform;
         shader.uniforms.uBottomGradientEnabled = bottomGradientUniforms.uBottomGradientEnabled;
         shader.uniforms.uBottomGradientStartY = bottomGradientUniforms.uBottomGradientStartY;
         shader.uniforms.uBottomGradientEndY = bottomGradientUniforms.uBottomGradientEndY;
@@ -553,14 +556,17 @@ export function applyToonShader(
               reflectedLight.directDiffuse += directLight.color * BRDF_Lambert( litHighlightAlbedo ) * litHighlight * uLitHighlightStrength;
             }`
           )
-          // 輪郭線の色トレス強化: 強い光やリム光が当たる輪郭ほど、線色を表面の光色へ柔らかくなじませる
+          // 色トレス: 輪郭線を黒ではなく、その場所の塗りの影色を暗く濃くした色で引く（肌は茶、髪は髪色の濃い色、白い服は灰青）。
+          // 輪郭線は法線が裏返しなので、ここでの拡散光は「その画素の影色 × 光の色」になっている（時間帯の光にも従う）
           .replace(
             '#if defined( OUTLINE )\n    col = outlineColorFactor.rgb * mix( vec3( 1.0 ), col, outlineLightingMixFactor );\n  #endif',
             /* glsl */ `#if defined( OUTLINE )
     vec3 baseOutline = outlineColorFactor.rgb * mix( vec3( 1.0 ), col, outlineLightingMixFactor );
-    float outlineLightLuma = dot( reflectedLight.directDiffuse + rimMix * rim, vec3( 0.2126, 0.7152, 0.0722 ) );
-    float traceBlend = clamp( outlineLightLuma * 0.35, 0.0, 0.38 ) * clamp( outlineLightingMixFactor + 0.35, 0.0, 1.0 );
-    col = mix( baseOutline, max( baseOutline, col * 0.62 ), traceBlend );
+    vec3 traceFill = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
+    float traceLuma = dot( traceFill, vec3( 0.2126, 0.7152, 0.0722 ) );
+    // 彩度を上げてから暗くする。明るい塗りほど強く落として、線として読めるようにする
+    vec3 traceColor = max( mix( vec3( traceLuma ), traceFill, 2.0 ), 0.0 ) * mix( 0.6, 0.42, smoothstep( 0.15, 0.9, traceLuma ) );
+    col = mix( baseOutline, traceColor, uColorTrace );
   #endif
   // 日差し側の外形（背景との境目）のすぐ内側だけを光らせる。輪郭線は元の色のまま残す
   // （理想の絵: 背景 → 暗い輪郭線 → 明るい帯 → 地の色）。毛束・襟・袖など内側の縁は光らない（判定は shader/SilhouetteRim.ts）
@@ -614,6 +620,7 @@ export function applyToonShader(
         shader.fragmentShader = shader.fragmentShader.replace(
           'void main() {',
           /* glsl */ `
+          uniform float uColorTrace;
           uniform float uBottomGradientEnabled;
           uniform float uBottomGradientStartY;
           uniform float uBottomGradientEndY;
@@ -1002,6 +1009,8 @@ export function applyToonShader(
         material.outlineLightingMixFactor = outlineCfg.lightingMixFactor;
         if (material.uniforms?.outlineLightingMixFactor) material.uniforms.outlineLightingMixFactor.value = outlineCfg.lightingMixFactor;
       }
+
+      if (typeof outlineCfg.colorTrace === 'number') colorTraceUniform.value = outlineCfg.colorTrace;
 
       // Outline Color: Automatically derived from material color / texture
       const darkness = outlineCfg.darknessFactor ?? 0.1;

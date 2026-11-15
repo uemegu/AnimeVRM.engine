@@ -91,4 +91,6 @@ export interface OutlineStyle {
   darknessFactor: number;
   widthFactor: number;
   lightingMixFactor: number;
+  /** 色トレス（0 = 黒に近い線、1 = 塗りの影色を暗く濃くした色の線） */
+  colorTrace?: number;
 }

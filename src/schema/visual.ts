@@ -195,6 +195,8 @@ export const OutlineConfig = group('輪郭線', 'Outline', {
   darknessFactor: num('暗さ', 'Darkness', 0.01, 0.5, 0.01),
   widthFactor: num('太さ', 'Width', 0, 0.01, 0.0002),
   lightingMixFactor: num('光の混ぜ具合', 'Lighting mix', 0, 1, 0.01),
+  /** 色トレス。輪郭線を、その場所の塗りの影色を暗く濃くした色で引く（0 で黒に近い線のまま） */
+  colorTrace: num('色トレス', 'Colored lineart', 0, 1, 0.05).min(0).max(1).optional(),
 });
 
 export const TimeOfDayPreset = z.strictObject({
@@ -453,6 +455,38 @@ export const LocationSeat = z.strictObject({
 });
 export type LocationSeat = z.infer<typeof LocationSeat>;
 
+/**
+ * 透過光（撮影処理）の光源。窓・街灯・提灯・画面など「ここが光る」と決めた所を板で登録する。
+ * 板は手前の壁・窓枠・人物で切り抜かれるので、窓なら壁の少し外側に窓より大きい板を置けば、窓の形に光る
+ */
+export const LocationTransmittedLight = z.strictObject({
+  /** 全体の強さ（既定 1） */
+  strength: z.number().min(0).max(3).optional(),
+  /** フレアの広がり（画面の高さに対する比。既定 0.07） */
+  radius: z.number().min(0.01).max(0.3).optional(),
+  lights: z.array(z.strictObject({
+    /** 板の中心（ワールド座標、メートル） */
+    position: z.tuple([z.number(), z.number(), z.number()]),
+    /** 板の幅と高さ（メートル） */
+    size: z.tuple([z.number().positive(), z.number().positive()]),
+    /** 板の向き（度。0 で +z 向き）。省略するとカメラへ向く（街灯・提灯など） */
+    rotationY: z.number().optional(),
+    /** 形（既定 rect） */
+    shape: z.enum(['rect', 'ellipse']).optional(),
+    /** 縁のぼかし幅（0〜1。既定 0.1） */
+    feather: z.number().min(0).max(1).optional(),
+    /** 中心色（芯。既定は白） */
+    centerColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    /** 周辺色（フレア） */
+    edgeColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    /** この光源の強さ（既定 1） */
+    strength: z.number().min(0).max(5).optional(),
+    /** 光る時間帯。省略するとすべての時間帯 */
+    timeOfDay: z.array(TimeOfDayId).optional(),
+  })),
+}).meta(label('透過光', 'Transmitted light'));
+export type LocationTransmittedLight = z.infer<typeof LocationTransmittedLight>;
+
 export const LocationVisualPreset = z.strictObject({
   id: z.string().regex(/^[a-z][a-z0-9_]*$/),
   name: z.string().meta(label('名前', 'Name')),
@@ -483,6 +517,7 @@ export const LocationVisualPreset = z.strictObject({
   light: LocationLight.optional(),
   wind: LocationWind.optional(),
   stage: LocationStage.optional(),
+  transmittedLight: LocationTransmittedLight.optional(),
   /** 座れる席（キー: 席の ID）。座りのモーションを置く位置 */
   seats: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/), LocationSeat).optional(),
 });

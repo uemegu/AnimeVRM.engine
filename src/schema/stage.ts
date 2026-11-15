@@ -144,8 +144,8 @@ export type EffectText = z.infer<typeof EffectText>;
 export const SweatMode = z.enum(['fly4', 'jito']);
 export type SweatMode = z.infer<typeof SweatMode>;
 
-/** 画面の切り替え演出（fade_black = 暗転してから映す、black = 暗転したまま次のカットまで映さない、white = 白く飛ばしたまま次のカットまで映さない、eyelid_close = 瞼を閉じるように暗くなる、eyelid_blink = まばたき） */
-export const ScreenTransition = z.enum(['fade_black', 'black', 'white', 'eyelid_close', 'eyelid_blink']);
+/** 画面の切り替え演出（memory = 回想への出入り。絵が波打って白くにじみ、1〜2秒で落ち着く、fade_black = 暗転してから映す、black = 暗転したまま次のカットまで映さない、white = 白く飛ばしたまま次のカットまで映さない、eyelid_close = 瞼を閉じるように暗くなる、eyelid_blink = まばたき） */
+export const ScreenTransition = z.enum(['fade_black', 'black', 'white', 'eyelid_close', 'eyelid_blink', 'memory']);
 export type ScreenTransition = z.infer<typeof ScreenTransition>;
 
 /**
@@ -184,6 +184,10 @@ export type ScrollingBackgroundConfig = z.infer<typeof ScrollingBackgroundConfig
  * シーンの特殊効果。その効果を持つ場所でだけ働く（ない場所では何もしない）。
  * 効果を足すときは、ここに項目を足し、場所の3D背景（userData.setEffects）で受け取る
  */
+/** 波ガラスの種類（underwater = 水の中から見た絵、または水槽・水面越しの絵。ゆっくり大きくうねる） */
+export const WAVE_GLASS_KINDS = ['underwater'] as const;
+export type WaveGlassKind = (typeof WAVE_GLASS_KINDS)[number];
+export const WAVE_GLASS_TARGETS = ['all', 'background', 'character'] as const;
 export const SCENE_EFFECT_IDS = ['fireworks', 'crowd'] as const;
 export type SceneEffectId = (typeof SCENE_EFFECT_IDS)[number];
 export const SceneEffects = z.strictObject({
@@ -191,6 +195,16 @@ export const SceneEffects = z.strictObject({
   fireworks: z.boolean().optional(),
   /** 群衆（場所の stage.crowd があるところ）。淡い色のモブを並べる。どこでも指定がなければ出す */
   crowd: z.boolean().optional(),
+  /** 波ガラス（絵のゆらぎ）。underwater = 水中。off で止める。どの場所でも働く */
+  waveGlass: z.enum(['off', ...WAVE_GLASS_KINDS]).optional(),
+  /** 波ガラスの強さ（既定 1） */
+  waveGlassStrength: z.number().min(0).max(3).optional(),
+  /** 水中の波ガラスを掛ける対象（all = 画面全体、background = 人物以外、character = 人物だけ。既定 all） */
+  waveGlassTarget: z.enum(WAVE_GLASS_TARGETS).optional(),
+  /** 水中の波ガラスを掛ける範囲（水槽の窓など） [左, 上, 右, 下]（画面に対する比。0〜1）。省略すると画面全体。縁はなだらかに消える */
+  waveGlassArea: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]).optional(),
+  /** 透過光の強さの倍率（場所に登録した光源に掛ける。既定 1、0 で切る）。光源を登録した場所でだけ働く */
+  transmittedLight: z.number().min(0).max(3).optional(),
 });
 export type SceneEffects = z.infer<typeof SceneEffects>;
 
