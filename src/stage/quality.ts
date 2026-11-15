@@ -18,6 +18,11 @@ export interface StageQuality {
    * 既定は切（確かめたモデル・モーションがまだ少ない）
    */
   skirtCloth: boolean;
+  /**
+   * 布（skirtCloth）が止まったら眠らせて計算を休む（cloth/solver.ts の sleep）。止まりきらずに細かく震え続けるのを防ぎ、
+   * 止まっている間の計算はほぼ 0 になる。切ると、止まっていても計算し続ける（検証・比べる用）
+   */
+  clothSleep: boolean;
   /** 背景ぼかし（postprocessing/DepthOfField.ts）。画面の全画素で40回ずつ読むので重い */
   depthOfField: boolean;
   /** キャラが地面に落とす影の解像度 */
@@ -38,8 +43,8 @@ export interface StageQuality {
 export type StageQualityLevel = 'high' | 'low';
 
 export const STAGE_QUALITY_PRESETS: Record<StageQualityLevel, StageQuality> = {
-  high: { handClearance: 'precise', clothDent: true, skirtCloth: false, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true, rimBloom: true },
-  low: { handClearance: 'simple', clothDent: true, skirtCloth: false, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false, rimBloom: false },
+  high: { handClearance: 'precise', clothDent: true, skirtCloth: false, clothSleep: true, depthOfField: true, shadowMapSize: 2048, maxPixelRatio: 2, godRaysSamples: 45, wetGroundSheen: true, rimBloom: true },
+  low: { handClearance: 'simple', clothDent: true, skirtCloth: false, clothSleep: true, depthOfField: false, shadowMapSize: 1024, maxPixelRatio: 1.5, godRaysSamples: 20, wetGroundSheen: false, rimBloom: false },
 };
 
 /** 段階の手動指定。URL の ?quality=low か、localStorage の stage_quality（検証・切り替え用） */

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { describePart } from './parts';
 import { weld, capRims, buildSDF } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
+import type { FabricSpec } from './fabric';
 import type { ClothWind } from './SkinnedCloth';
 
 /**
@@ -42,6 +43,8 @@ export interface MeshClothOptions {
   cell?: number;
   /** ソルバーの設定（solver.ts の ClothOptions） */
   solver?: Partial<ClothOptions>;
+  /** 生地（fabric.ts の名前か、曲げ剛性 N·m と重さ kg/m²）。曲げにくさと重さが決まる。既定はスーツ地 */
+  fabric?: FabricSpec;
 }
 
 /** 1フレームでこれ以上（m）follow の物体が動いたら、位置が飛んだとみなして布を置き直す */
@@ -107,7 +110,7 @@ export class MeshCloth {
     const options: MeshClothOptions = { ...MeshCloth.defaults, ...given, solver: { ...MeshCloth.defaults.solver, ...given.solver } };
     MeshCloth.skipped = '';
     const skip = (reason: string): null => { MeshCloth.skipped = reason; return null; };
-    const { mesh, metresPerUnit: S = 1, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {} } = options;
+    const { mesh, metresPerUnit: S = 1, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {}, fabric = 'suiting' } = options;
     if (!mesh.geometry.index) return skip('メッシュに index がない');
     const follow = options.follow ?? mesh.parent ?? mesh;
     let root: THREE.Object3D = mesh;
@@ -197,7 +200,7 @@ export class MeshCloth {
     let px = 0, pz = 0, pn = 0;
     for (let i = 0; i < sp.position.length; i += 3) if (sp.position[i + 1] > topY - 0.066 * len) { px += sp.position[i]; pz += sp.position[i + 2]; pn++; }
 
-    const cloth = createCloth({ position: sp.position, index: sp.index, colliders, pivot: [px / pn, pz / pn], free: sp.extra, opts: solver });
+    const cloth = createCloth({ position: sp.position, index: sp.index, colliders, pivot: [px / pn, pz / pn], free: sp.extra, opts: solver, fabric });
     cloth.driven = true;
     if (cloth.n === cloth.pinned.length) return skip('布になる点がない');
     if (restFit > 0) cloth.fitRestToGravity(restFit);
@@ -250,6 +253,9 @@ export class MeshCloth {
   }
 
   /** 布全体を、基準の形のまま今の位置・向きへ置き直して、そこから始める */
+  /** 外から動かすものがなく、布が止まって計算を休んでいるか（solver の sleep。cloth.o.sleep = false で止めない） */
+  get sleeping(): boolean { return this.cloth.sleeping; }
+
   settle(): void {
     this.readFrames();
     const m = this.cloth.frames.ref.M, X0 = this.cloth.X0;

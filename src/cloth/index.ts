@@ -10,10 +10,11 @@
  * 使い方は README.md。
  */
 export { SkinnedCloth, type SkinnedClothOptions, type SkinnedClothColliders, type ClothWind } from './SkinnedCloth';
-export { createVrmSkirt, createVrmGarments, type VrmLike, type VrmSkirtOptions, type GarmentCloth } from './vrm';
+export { createVrmSkirt, createVrmGarments, type VrmLike, type VrmSkirtOptions, type GarmentSpec, type GarmentCloth } from './vrm';
 export { createVrmKnit } from './knit';
 export { MeshCloth, type MeshClothOptions } from './MeshCloth';
 export { createMeshSkirt, skirtMetresPerUnit, WAIST_RADIUS, type MeshSkirtOptions } from './mesh';
 export { describeParts, describeMeshes, describePart, pickSkirt, pickColliders, hemOf, type ModelPart, type OpenRim } from './parts';
 export { createCloth, subdivide, type Cloth, type ClothInput, type ClothOptions, type ClothCollider } from './solver';
 export { buildSDF, capRims, weld, type DistanceGrid, type WeldedMesh } from './sdf';
+export { FABRICS, fabricOf, bendingLength, kesBending, kesWeight, type Fabric, type FabricName, type FabricPreset, type FabricSpec } from './fabric';

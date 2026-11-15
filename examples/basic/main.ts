@@ -3,7 +3,8 @@
  * 必要な素材はモデル（public/models/aoi-school.vrm）だけで、待機モーションの FBX は使わない（腕を下ろした姿勢で立つ）
  *
  * URL で切り替えられるもの：
- * - ?cloth=1        スカートを布として動かす（src/cloth）
+ * - ?cloth=1        既定のモデルのスカートを布として動かす（src/cloth。布にする服はモデルごとに指定する：下の DEFAULT_CLOTH）
+ * - ?cloth={...}    布にする服を JSON で指定する（材質名かメッシュ名 → { fabric, kind?, over? }。src/cloth/vrm.ts の GarmentSpec）
  * - ?motion=<名前>  public/animations/<名前>.fbx のモーションを繰り返す（FBX は自分で置く）
  * - ?model=<URL>    読み込む VRM（省くと public/models/aoi-school.vrm）
  */
@@ -11,6 +12,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { StageManager } from '../../src/stage/StageManager';
 import { StageAvatar } from '../../src/stage/StageAvatar';
+import type { GarmentSpec } from '../../src/cloth/vrm';
 import { registerEnvironment } from '../../src/stage/environments';
 import { configureAssets } from '../../src/utils/path';
 import type { LocationVisualPreset, TimeOfDayPreset } from '../../src/schema/visual';
@@ -50,10 +52,16 @@ const motion = params.get('motion') ?? undefined;
 // ?knitopts={...}：上着の布（src/cloth/knit.ts）の設定を試す
 StageAvatar.knitOptions = JSON.parse(params.get('knitopts') ?? '{}');
 
+// 既定のモデル（aoi-school.vrm）で布にする服：スカートをスーツ地で
+const DEFAULT_CLOTH: Record<string, GarmentSpec> = { N00_001_03_Bottoms_01_CLOTH: { fabric: 'suiting' } };
+const clothParam = params.get('cloth');
+const cloth: Record<string, GarmentSpec> | null = clothParam === '1' ? DEFAULT_CLOTH : clothParam ? JSON.parse(clothParam) : null;
+
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const stage = new StageManager({
   canvas,
-  quality: params.get('cloth') === '1' ? { skirtCloth: true } : undefined,
+  quality: cloth ? { skirtCloth: true } : undefined,
+  garments: () => cloth ?? undefined,
   presets: { timeOfDay: { day: day as TimeOfDayPreset }, locations: { floor } },
   initialTimeOfDay: 'day',
   initialLocationId: 'floor',

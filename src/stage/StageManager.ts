@@ -47,6 +47,7 @@ import { applyCameraMove } from './cameraMove';
 import { MistDissolve } from '../effects/mist/MistDissolve';
 import { LightBeam } from '../effects/beam/LightBeam';
 import { FrameRateCheck, resolveStageQuality, stageQualityOf, type StageQuality, type StageQualityLevel } from './quality';
+import type { GarmentSpec } from '../cloth/vrm';
 
 /** これより短いモーションは止め絵のポーズとして扱う（待機に戻さず保つ） */
 // 3D背景の動かない小物の影を描くときだけ使うレイヤー（staticShadowCamera が見る）
@@ -123,6 +124,11 @@ export interface StageOptions {
    * 使う側が setQuality で下げる。1回呼んだら、次に setQuality するまで呼ばない（指定したときだけ測る）
    */
   onSlowFrames?: () => void;
+  /**
+   * モデル（URL）ごとに、布にする服（材質名かメッシュ名 → 生地など。cloth/vrm.ts の GarmentSpec）を返す。アバターを
+   * 読み込むたびに呼ぶ（キャラ設定の models[].cloth など）。書いた服だけを布にする。省くと、どの服も布にしない
+   */
+  garments?: (modelUrl: string) => Record<string, GarmentSpec> | undefined | Promise<Record<string, GarmentSpec> | undefined>;
   /**
    * 描画の画素比。canvas を transform で縮めて表示するときは、縮めた分を掛けた値を返す（省略時は端末の画素比、上限2）。
    * 値が変わったら resize を呼び直す
@@ -313,6 +319,8 @@ export class StageManager {
   private language: 'ja' | 'en';
   private quality: StageQuality;
   private readonly qualityOption: StageOptions['quality'];
+  /** モデル（URL）ごとの、布にする服を返す（StageOptions.garments） */
+  private readonly garmentsOf?: StageOptions['garments'];
   /** 描画チェック（onSlowFrames を指定したときだけ）。知らせたら、次の setQuality まで止める */
   private frameRateCheck: FrameRateCheck | null = null;
   private readonly onSlowFrames?: () => void;
@@ -338,6 +346,7 @@ export class StageManager {
     this.getCutTime = options.getCutTime;
     this.language = options.language ?? 'ja';
     this.qualityOption = options.quality;
+    this.garmentsOf = options.garments;
     this.quality = resolveStageQuality(options.quality);
     this.onSlowFrames = options.onSlowFrames;
     if (this.onSlowFrames) this.frameRateCheck = new FrameRateCheck();
@@ -1158,6 +1167,7 @@ export class StageManager {
   }
 
   private async createAvatar(id: string, modelUrl: string): Promise<StageAvatar> {
+    const garments = await Promise.resolve(this.garmentsOf?.(modelUrl)).catch(() => undefined);
     const avatar = new StageAvatar({
       id,
       modelUrl,
@@ -1167,6 +1177,8 @@ export class StageManager {
       handClearance: this.quality.handClearance,
       clothDent: this.quality.clothDent,
       skirtCloth: this.quality.skirtCloth,
+      clothSleep: this.quality.clothSleep,
+      garments,
     });
 
     await avatar.load(modelUrl);
@@ -2211,6 +2223,7 @@ export class StageManager {
       avatar.setHandClearance(this.quality.handClearance);
       avatar.setClothDent(this.quality.clothDent);
       avatar.setSkirtCloth(this.quality.skirtCloth);
+      avatar.setClothSleep(this.quality.clothSleep);
     });
     this.applyDepthOfField();
     this.rainGround.setSheen(this.quality.wetGroundSheen);

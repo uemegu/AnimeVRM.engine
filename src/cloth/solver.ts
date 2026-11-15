@@ -1,4 +1,5 @@
 import type { DistanceGrid } from './sdf';
+import { fabricOf, type FabricSpec } from './fabric';
 
 /**
  * 布のソルバー（XPBD、CPU）。スカートを点と拘束の集まりとして解く。モデルや描画のことは知らない。
@@ -7,9 +8,15 @@ import type { DistanceGrid } from './sdf';
 // The skirt as cloth: XPBD with small substeps on the CPU.
 //   points       the skirt's vertices welded across UV seams (after `subdivide` splits every triangle in four)
 //   stretch      every triangle edge keeps its length
-//   bend         flat edges: the two vertices facing each other across the edge keep their distance, softly.
-//                creases (the pleats' folds, bent more than `creaseAngle` at rest): the signed fold angle itself is
-//                kept, stiffer, like a heat-set pleat: a distance cannot tell a fold from the same fold inside out
+//   bend         every inner edge keeps the signed fold angle between its two triangles. Flat edges (the cloth itself):
+//                stiffness from the fabric's bending rigidity B (N m, measured: fabric.ts), as in Discrete Shells
+//                (Grinspun et al. 2003): energy 1/2 k (angle - rest)^2 with k = 3 B |e|^2 / (A1 + A2), so the bending does
+//                not depend on how finely the mesh is cut. XPBD compliance 1/k, for points of real mass (the fabric's weight
+//                per area times the area each point stands for): with the solver's unit masses that is m / k.
+//                (Until 2026-11-15 the two vertices facing each other across the edge kept their distance, with a
+//                compliance of no unit: a distance hardly changes while the cloth is flat, and a blazer bent like a knit.)
+//                creases (the pleats' folds, bent more than `creaseAngle` at rest): the same angle, kept stiffer, like a
+//                heat-set pleat (`crease`: no measured value found for a pressed pleat, so still a compliance of its own)
 //   self         points keep at least `thickness` apart (or their rest distance, where layers are stacked closer)
 //   tether       no point gets further from its nearest pinned point than in the rest shape (stops rubber-band
 //                stretch when the cloth is yanked)
@@ -58,7 +65,80 @@ export function foldAngle(X: ArrayLike<number>, a: number, b: number, c: number,
   const e = sub(b, a), n1 = cross(sub(c, a), sub(c, b)), n2 = cross(sub(d, b), sub(d, a));
   return Math.atan2(dot(cross(n1, n2), e) / Math.hypot(...e), dot(n1, n2));
 }
-const GRAD_SIGN = -1;   // solveCreases' u is -d(angle)/dx (checked by finite differences, test-fold.mjs)
+const GRAD_SIGN = -1;   // solveHinges' u is -d(angle)/dx (checked by finite differences, test-fold.mjs)
+
+// fold angles: keep the signed angle across each edge (C: [edge end, edge end, wing, wing] per edge, T: the angles to
+// keep). The compliance is `alpha` for every edge, or per edge `alphas[q] * scale`. `invMass` (optional): each point's
+// 1 / mass (kg), multiplied into `w`: with it the hinges move the points as their real masses would (the fabric's bending,
+// compliance 1 / k), without it every point weighs 1 (the creases, whose compliance has no unit). (Until the review of
+// 2026-11-15 the fabric's hinges used every point at 1 and a compliance of their 4 points' mean mass / k: right only for
+// equal masses, and the knit's samples differ up to 30 times, so the bending alone moved their centre of mass.)
+export function solveHinges(x: Float64Array, w: ArrayLike<number>, C: Uint32Array, T: Float64Array, alpha: number, alphas: Float64Array | null = null, scale = 0, invMass: ArrayLike<number> | null = null): void {
+  for (let q = 0; q < T.length; q++) {
+    const i3 = C[q * 4], i4 = C[q * 4 + 1], i1 = C[q * 4 + 2], i2 = C[q * 4 + 3];
+    const w1 = invMass ? w[i1] * invMass[i1] : w[i1], w2 = invMass ? w[i2] * invMass[i2] : w[i2], w3 = invMass ? w[i3] * invMass[i3] : w[i3], w4 = invMass ? w[i4] * invMass[i4] : w[i4];
+    if (!(w1 + w2 + w3 + w4)) continue;
+    const k1 = i1 * 3, k2 = i2 * 3, k3 = i3 * 3, k4 = i4 * 3;
+    const ex = x[k4] - x[k3], ey = x[k4 + 1] - x[k3 + 1], ez = x[k4 + 2] - x[k3 + 2];
+    const ax = x[k1] - x[k3], ay = x[k1 + 1] - x[k3 + 1], az = x[k1 + 2] - x[k3 + 2];   // wing 1 from the edge's ends
+    const bx = x[k1] - x[k4], by = x[k1 + 1] - x[k4 + 1], bz = x[k1 + 2] - x[k4 + 2];
+    const cx = x[k2] - x[k4], cy = x[k2 + 1] - x[k4 + 1], cz = x[k2 + 2] - x[k4 + 2];   // wing 2
+    const dx = x[k2] - x[k3], dy = x[k2 + 1] - x[k3 + 1], dz = x[k2 + 2] - x[k3 + 2];
+    const n1x = ay * bz - az * by, n1y = az * bx - ax * bz, n1z = ax * by - ay * bx;
+    const n2x = cy * dz - cz * dy, n2y = cz * dx - cx * dz, n2z = cx * dy - cy * dx;
+    const s1 = n1x * n1x + n1y * n1y + n1z * n1z, s2 = n2x * n2x + n2y * n2y + n2z * n2z, el = Math.sqrt(ex * ex + ey * ey + ez * ez);
+    if (s1 < 1e-16 || s2 < 1e-16 || el < 1e-9) continue;
+    const cos = n1x * n2x + n1y * n2y + n1z * n2z;
+    const sin = ((n1y * n2z - n1z * n2y) * ex + (n1z * n2x - n1x * n2z) * ey + (n1x * n2y - n1y * n2x) * ez) / el;
+    let Cq = Math.atan2(sin, cos) - T[q];
+    if (Cq > Math.PI) Cq -= 2 * Math.PI; else if (Cq < -Math.PI) Cq += 2 * Math.PI;
+    // gradient of the angle (Bridson et al. 2003, "Simulation of clothing with folds and wrinkles")
+    const f1 = el / s1, f2 = el / s2;
+    const g3a = (bx * ex + by * ey + bz * ez) / (el * s1), g3b = (cx * ex + cy * ey + cz * ez) / (el * s2);
+    const g4a = -(ax * ex + ay * ey + az * ez) / (el * s1), g4b = -(dx * ex + dy * ey + dz * ez) / (el * s2);
+    const u1x = f1 * n1x, u1y = f1 * n1y, u1z = f1 * n1z, u2x = f2 * n2x, u2y = f2 * n2y, u2z = f2 * n2z;
+    const u3x = g3a * n1x + g3b * n2x, u3y = g3a * n1y + g3b * n2y, u3z = g3a * n1z + g3b * n2z;
+    const u4x = g4a * n1x + g4b * n2x, u4y = g4a * n1y + g4b * n2y, u4z = g4a * n1z + g4b * n2z;
+    const den = w1 * (u1x * u1x + u1y * u1y + u1z * u1z) + w2 * (u2x * u2x + u2y * u2y + u2z * u2z)
+      + w3 * (u3x * u3x + u3y * u3y + u3z * u3z) + w4 * (u4x * u4x + u4y * u4y + u4z * u4z) + (alphas ? alphas[q] * scale : alpha);
+    const lam = -GRAD_SIGN * Cq / den;
+    x[k1] += lam * w1 * u1x; x[k1 + 1] += lam * w1 * u1y; x[k1 + 2] += lam * w1 * u1z;
+    x[k2] += lam * w2 * u2x; x[k2 + 1] += lam * w2 * u2y; x[k2 + 2] += lam * w2 * u2z;
+    x[k3] += lam * w3 * u3x; x[k3 + 1] += lam * w3 * u3y; x[k3 + 2] += lam * w3 * u3z;
+    x[k4] += lam * w4 * u4x; x[k4 + 1] += lam * w4 * u4y; x[k4 + 2] += lam * w4 * u4z;
+  }
+}
+
+/**
+ * 生地の曲げの拘束（Discrete Shells：Grinspun ほか 2003）。三角形の内側の辺ごとに、2 枚の面の角度を保つ。
+ * 強さ k = 3 B |e|^2 / (A1 + A2)（B は生地の曲げ剛性 N·m）。返す alphas は柔らかさ 1 / k で、solveHinges に点ごとの
+ * 1 / 重さ（kg）を渡して解く。faces の向きはそろっていること。辺がちょうど 2 枚の面に挟まれているときだけ拘束にする。
+ * keep(a, b, c, d, angle) が false の辺は外す（折り目を別に扱うときなど）
+ */
+export function fabricHinges(P: ArrayLike<number>, faces: ArrayLike<number>, bending: number,
+  keep: ((a: number, b: number, c: number, d: number, angle: number) => boolean) | null = null) {
+  const area = (a: number, b: number, c: number) => {
+    const ux = P[b * 3] - P[a * 3], uy = P[b * 3 + 1] - P[a * 3 + 1], uz = P[b * 3 + 2] - P[a * 3 + 2];
+    const vx = P[c * 3] - P[a * 3], vy = P[c * 3 + 1] - P[a * 3 + 1], vz = P[c * 3 + 2] - P[a * 3 + 2];
+    return 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+  };
+  const edges = new Map<string, number[]>();
+  for (let f = 0; f < faces.length; f += 3) for (let k = 0; k < 3; k++) {
+    const a = faces[f + k], b = faces[f + (k + 1) % 3], c = faces[f + (k + 2) % 3], key = a < b ? `${a},${b}` : `${b},${a}`;
+    const e = edges.get(key);
+    if (e) e.push(c); else edges.set(key, [a, b, c]);
+  }
+  const C: number[] = [], T: number[] = [], A: number[] = [];
+  for (const e of edges.values()) {
+    if (e.length !== 4) continue;
+    const [a, b, c, d] = e, angle = foldAngle(P, a, b, c, d);
+    if (keep && !keep(a, b, c, d, angle)) continue;
+    const len2 = (P[a * 3] - P[b * 3]) ** 2 + (P[a * 3 + 1] - P[b * 3 + 1]) ** 2 + (P[a * 3 + 2] - P[b * 3 + 2]) ** 2;
+    const k = 3 * bending * len2 / Math.max(1e-12, area(a, b, c) + area(a, b, d));
+    C.push(a, b, c, d); T.push(angle); A.push(1 / k);
+  }
+  return { C: new Uint32Array(C), T: new Float64Array(T), alphas: new Float64Array(A) };
+}
 
 // `free` (optional): per vertex, 1 = cloth, 0 = held to the body (from a rig's weights); without it the top is held
 // 3x4 matrices, row-major: [r00 r01 r02 tx  r10 r11 r12 ty  r20 r21 r22 tz]
@@ -80,13 +160,15 @@ function inv12(m: Float64Array, out: Float64Array): void {
 // one grid in world space.
 export interface ClothOptions {
   substeps: number; gravity: number;
-  stretch: number; bend: number; crease: number; creaseAngle: number;
+  stretch: number; crease: number; creaseAngle: number;
   thickness: number; selfEvery: number; pairSlack: number; selfFriction: number;
   shapeEvery: number; maxRebuilds: number; minEdge: number; maxSpeed: number;
-  shape: number; shapeMin: number; shapeMax: number; shapePer: number;
+  shape: number; shapeMin: number; shapeMax: number; shapePer: number; shapeScale: number;
   tetherSlack: number; margin: number; friction: number;
   air: number; drag: number; inflate: number; shield: number; gust: number; maxAero: number;
   damping: number; pinBelowTop: number; grabRadius: number;
+  sleep: boolean; quietAccel: number; quietSpeed: number; quietAir: number; calmAfter: number; sleepAfter: number; sleepSpeed: number;
+  calmDamping: number; wakeDist: number; wakeAngle: number;
 }
 export interface ClothCollider { sdf: DistanceGrid; rest?: Float64Array }
 export interface ClothInput {
@@ -97,15 +179,20 @@ export interface ClothInput {
   pivot: [number, number];
   free?: ArrayLike<number> | null;
   opts?: Partial<ClothOptions>;
+  /**
+   * 生地（fabric.ts）。曲げの強さと点の重さを、生地の曲げ剛性（N·m）と面積あたりの重さ（kg/m²）から決める。
+   * 位置はメートルで渡すこと。既定はスーツ地
+   */
+  fabric?: FabricSpec;
 }
 interface Grab { ids: number[]; off: number[]; centre: number; target: number[]; prev: number[] }
 export type Cloth = ReturnType<typeof createCloth>;
 
-export function createCloth({ position, index, sdf = null, colliders = null, pivot, free = null, opts = {} }: ClothInput) {
+export function createCloth({ position, index, sdf = null, colliders = null, pivot, free = null, opts = {}, fabric: fabricSpec = 'suiting' }: ClothInput) {
+  const fabric = fabricOf(fabricSpec);
   const o: ClothOptions = {
     substeps: 16, gravity: -9.8,
     stretch: 0,        // compliance of the edges (0 = as stiff as the substeps allow)
-    bend: 2e-4,        // compliance of the bend distances; larger = limper cloth
     crease: 2e-3, creaseAngle: 0.35,   // compliance of the fold angles (rad), and how bent an edge must be to count
     thickness: 0.008, selfEvery: 1, pairSlack: 0.006, selfFriction: 0.15,
     // selfEvery 1: solved every other substep, cloth folded on itself never came to rest. The other constraints pulled
@@ -116,17 +203,43 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     maxSpeed: 6,
     shape: 2e-3,       // compliance of the long distances (see below); larger = the flare sags more
     shapeMin: 0.05, shapeMax: 0.09, shapePer: 4,
+    // how much of the long distances is kept, 0-1 (may be changed while running). They hold the skirt's flare as modelled;
+    // with the thighs raised (sitting, lying) that is not how the cloth falls any more, and at 1 a seated skirt stood out
+    // round its thighs like a bell. SkinnedCloth lowers it to 0 then (`legs`): the cloth lies on the body as it falls
+    shapeScale: 1,
     tetherSlack: 1.06,
     margin: 0.004, friction: 0.5,
     air: 1,            // linear drag along the normal, 1/s
-    drag: 3.6,         // quadratic drag, 1/m: 0.5 * 1.2 kg/m3 * Cd 1.2 / 0.2 kg/m2
-    inflate: 2.4,      // caught air, 1/m: 0.5 * 1.2 / 0.2, times 0.8 for what leaks out
+    drag: 0.72 / fabric.weight,     // quadratic drag, 1/m: 0.5 * 1.2 kg/m3 * Cd 1.2 / the fabric's weight per area
+    inflate: 0.48 / fabric.weight,  // caught air, 1/m: 0.5 * 1.2 / weight, times 0.8 for what leaks out
     shield: 0.3,       // share of the wind that reaches a wall from its inner side
     gust: 0.3,         // how much the wind differs from place to place
     maxAero: 80,       // m/s2
     damping: 0.4,      // plain velocity damping, 1/s
     pinBelowTop: 0.012,   // points this close under the top rim are held too
     grabRadius: 0.03,
+    // ---- sleep: with nothing moving the cloth from outside, it is brought to rest and then not simulated at all ----
+    // "Nothing from outside": the hips do not change speed (quietAccel), the body's pieces and the held points do not move
+    // against the hips (quietSpeed), no wind, no pinch. After calmAfter seconds of that the damping grows (to calmDamping),
+    // and the cloth is put to sleep once its points are slower than sleepSpeed against the hips, or sleepAfter seconds
+    // after the quiet began whatever they do (so it always comes to rest; a skirt still swinging from a spin has had time
+    // to swing out by then). Asleep, every point rides rigidly on the hips. It wakes when the hips change speed, a piece of
+    // the body or a held point has moved wakeDist from where it was against the hips, the hips have tilted wakeAngle
+    // (gravity now pulls another way), the wind blows or the cloth is pinched. Waking goes on from where it was, at the speed
+    // it was carried at: nothing jumps either way. Off (sleep: false) for cloth that must keep moving with nothing driving
+    // it (slow motion of a small sway, say).
+    sleep: true,
+    quietAccel: 2,      // m/s2
+    quietSpeed: 0.05,   // m/s
+    // m/s: the hips carry the cloth through the air no faster than this (the air against the cloth is what the drag works on:
+    // without it a character slid along at 1 m/s fell asleep and stopped being blown back. Codex's review, 2026-11-15).
+    // At 0.3 m/s the drag is 0.3 m/s2 at most, 3% of gravity
+    quietAir: 0.3,
+    calmAfter: 0.3, sleepAfter: 1.2,   // s
+    sleepSpeed: 0.03,   // m/s
+    calmDamping: 8,     // 1/s
+    wakeDist: 0.004,    // m
+    wakeAngle: 0.05,    // rad
     ...opts,
   };
   const nR = position.length / 3;
@@ -173,7 +286,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     if (e) e[3] = c; else edge.set(key, [a, b, c, -1]);
   }
   const dist0 = (i: number, j: number) => Math.hypot(X0[i * 3] - X0[j * 3], X0[i * 3 + 1] - X0[j * 3 + 1], X0[i * 3 + 2] - X0[j * 3 + 2]);
-  const cs: number[] = [], cb: number[] = [], cd: number[] = [], cth: number[] = [];
+  const cs: number[] = [], cd: number[] = [], cth: number[] = [];
   let topY = -Infinity;
   for (let i = 0; i < n; i++) topY = Math.max(topY, X0[i * 3 + 1]);
   const midY = (topY + Math.min(...Array.from({ length: n }, (_, i) => X0[i * 3 + 1]))) / 2;
@@ -185,7 +298,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     cs.push(a, b);
     if (d >= 0) {
       const th = foldAngle(X0, a, b, c, d);
-      if (Math.abs(th) > o.creaseAngle) { cd.push(a, b, c, d); cth.push(th); } else cb.push(c, d);
+      if (Math.abs(th) > o.creaseAngle) { cd.push(a, b, c, d); cth.push(th); }
     } else if (!free && X0[a * 3 + 1] > topY - 0.15 * (topY - botY) && X0[b * 3 + 1] > topY - 0.15 * (topY - botY)) { w[a] = 0; w[b] = 0; rimTop.push(X0[a * 3 + 1], X0[b * 3 + 1]); }
   }
   // What is held to the waist: the open rim at the top, and everything above `pinY`. Normally that is a narrow band
@@ -205,9 +318,19 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     for (let i = 0; i < n; i++) if (!held[find(i)]) w[i] = 0;
   }
   const pinned: number[] = []; for (let i = 0; i < n; i++) if (!w[i]) pinned.push(i);
-  const CS = new Uint32Array(cs), LS = new Float64Array(cs.length / 2), CB = new Uint32Array(cb), LB = new Float64Array(cb.length / 2);
+  const CS = new Uint32Array(cs), LS = new Float64Array(cs.length / 2);
+  // ---- the fabric: each point's mass (weight per area times a third of its triangles' area) and each flat edge's
+  // bending stiffness (Discrete Shells), as a compliance for the solver's unit masses: mean mass of its 4 points / k ----
+  const triArea = (P: ArrayLike<number>, a: number, b: number, c: number) => {
+    const ux = P[b * 3] - P[a * 3], uy = P[b * 3 + 1] - P[a * 3 + 1], uz = P[b * 3 + 2] - P[a * 3 + 2];
+    const vx = P[c * 3] - P[a * 3], vy = P[c * 3 + 1] - P[a * 3 + 1], vz = P[c * 3 + 2] - P[a * 3 + 2];
+    return 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+  };
+  const mass = new Float64Array(n);
+  for (let f = 0; f < nF; f++) { const A = triArea(X0, F[f * 3], F[f * 3 + 1], F[f * 3 + 2]) / 3; for (let k = 0; k < 3; k++) mass[F[f * 3 + k]] += A * fabric.weight; }
+  const { C: CB, T: TB, alphas: AB } = fabricHinges(X0, F, fabric.bending, (_a, _b, _c, _d, angle) => Math.abs(angle) <= o.creaseAngle);
+  const invMass = Float64Array.from(mass, (m) => (m > 0 ? 1 / m : 0));
   for (let k = 0; k < LS.length; k++) LS[k] = dist0(CS[k * 2], CS[k * 2 + 1]);
-  for (let k = 0; k < LB.length; k++) LB[k] = dist0(CB[k * 2], CB[k * 2 + 1]);
   const CD = new Uint32Array(cd), TH = new Float64Array(cth);
   // ---- long distances: each point keeps its distance to a few points 5-9cm away, softly. Edge-to-edge bending alone
   // only carries stiffness a couple of centimetres per pass, so the flare of the pleated cone sags under its weight;
@@ -373,7 +496,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   }
 
   const wind: number[] = [0, 0, 0];
-  const stats = { ms: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
+  const stats = { asleep: false, watch: { accel: 0, speed: 0, drift: 0, tilt: 0, air: 0 }, ms: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
 
   function solve(C: Uint32Array, L: Float64Array, alpha: number): void {
     for (let q = 0; q < L.length; q++) {
@@ -388,42 +511,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
   }
 
-  // fold angles: keep the signed angle across each crease
-  function solveCreases(alpha: number): void {
-    for (let q = 0; q < TH.length; q++) {
-      const i3 = CD[q * 4], i4 = CD[q * 4 + 1], i1 = CD[q * 4 + 2], i2 = CD[q * 4 + 3];
-      const w1 = w[i1], w2 = w[i2], w3 = w[i3], w4 = w[i4];
-      if (!(w1 + w2 + w3 + w4)) continue;
-      const k1 = i1 * 3, k2 = i2 * 3, k3 = i3 * 3, k4 = i4 * 3;
-      const ex = x[k4] - x[k3], ey = x[k4 + 1] - x[k3 + 1], ez = x[k4 + 2] - x[k3 + 2];
-      const ax = x[k1] - x[k3], ay = x[k1 + 1] - x[k3 + 1], az = x[k1 + 2] - x[k3 + 2];   // wing 1 from the edge's ends
-      const bx = x[k1] - x[k4], by = x[k1 + 1] - x[k4 + 1], bz = x[k1 + 2] - x[k4 + 2];
-      const cx = x[k2] - x[k4], cy = x[k2 + 1] - x[k4 + 1], cz = x[k2 + 2] - x[k4 + 2];   // wing 2
-      const dx = x[k2] - x[k3], dy = x[k2 + 1] - x[k3 + 1], dz = x[k2 + 2] - x[k3 + 2];
-      const n1x = ay * bz - az * by, n1y = az * bx - ax * bz, n1z = ax * by - ay * bx;
-      const n2x = cy * dz - cz * dy, n2y = cz * dx - cx * dz, n2z = cx * dy - cy * dx;
-      const s1 = n1x * n1x + n1y * n1y + n1z * n1z, s2 = n2x * n2x + n2y * n2y + n2z * n2z, el = Math.sqrt(ex * ex + ey * ey + ez * ez);
-      if (s1 < 1e-16 || s2 < 1e-16 || el < 1e-9) continue;
-      const cos = n1x * n2x + n1y * n2y + n1z * n2z;
-      const sin = ((n1y * n2z - n1z * n2y) * ex + (n1z * n2x - n1x * n2z) * ey + (n1x * n2y - n1y * n2x) * ez) / el;
-      let C = Math.atan2(sin, cos) - TH[q];
-      if (C > Math.PI) C -= 2 * Math.PI; else if (C < -Math.PI) C += 2 * Math.PI;
-      // gradient of the angle (Bridson et al. 2003, "Simulation of clothing with folds and wrinkles")
-      const f1 = el / s1, f2 = el / s2;
-      const g3a = (bx * ex + by * ey + bz * ez) / (el * s1), g3b = (cx * ex + cy * ey + cz * ez) / (el * s2);
-      const g4a = -(ax * ex + ay * ey + az * ez) / (el * s1), g4b = -(dx * ex + dy * ey + dz * ez) / (el * s2);
-      const u1x = f1 * n1x, u1y = f1 * n1y, u1z = f1 * n1z, u2x = f2 * n2x, u2y = f2 * n2y, u2z = f2 * n2z;
-      const u3x = g3a * n1x + g3b * n2x, u3y = g3a * n1y + g3b * n2y, u3z = g3a * n1z + g3b * n2z;
-      const u4x = g4a * n1x + g4b * n2x, u4y = g4a * n1y + g4b * n2y, u4z = g4a * n1z + g4b * n2z;
-      const den = w1 * (u1x * u1x + u1y * u1y + u1z * u1z) + w2 * (u2x * u2x + u2y * u2y + u2z * u2z)
-        + w3 * (u3x * u3x + u3y * u3y + u3z * u3z) + w4 * (u4x * u4x + u4y * u4y + u4z * u4z) + alpha;
-      const lam = -GRAD_SIGN * C / den;
-      x[k1] += lam * w1 * u1x; x[k1 + 1] += lam * w1 * u1y; x[k1 + 2] += lam * w1 * u1z;
-      x[k2] += lam * w2 * u2x; x[k2 + 1] += lam * w2 * u2y; x[k2 + 2] += lam * w2 * u2z;
-      x[k3] += lam * w3 * u3x; x[k3 + 1] += lam * w3 * u3y; x[k3 + 2] += lam * w3 * u3z;
-      x[k4] += lam * w4 * u4x; x[k4 + 1] += lam * w4 * u4y; x[k4 + 2] += lam * w4 * u4z;
-    }
-  }
+  const hinges = (C: Uint32Array, T: Float64Array, alpha: number, alphas: Float64Array | null = null, scale = 0, im: ArrayLike<number> | null = null) => solveHinges(x, w, C, T, alpha, alphas, scale, im);
 
   // ---- cloth against cloth: point pairs from a hash grid, refreshed a few times a frame ----
   const TS = 2 * n + 1, cellStart = new Int32Array(TS + 1), cellItem = new Int32Array(n), cellOf = new Int32Array(n);
@@ -536,14 +624,115 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
   }
 
+  // ---- sleep ----
+  // A few points on the cloth's own scale, in the rest pose, to tell how the hips move (a change of speed or of turn).
+  const half = Math.max(0.05, (topY - botY) / 2);
+  const refPts = Float64Array.of(pivot[0], topY, pivot[1], pivot[0], botY, pivot[1], pivot[0] + half, midY, pivot[1], pivot[0], midY, pivot[1] + half);
+  const refPos = new Float64Array(12), refVel = new Float64Array(12);
+  // per piece of the body: the middle of its grid and three of its corners, in its own space
+  const colPts = new Float64Array(cols.length * 12);
+  cols.forEach((col, q) => {
+    const b = col.sdf.box, cx = (b[0] + b[3]) / 2, cy = (b[1] + b[4]) / 2, cz = (b[2] + b[5]) / 2;
+    colPts.set([cx, cy, cz, b[3], cy, cz, cx, b[4], cz, cx, cy, b[5]], q * 12);
+  });
+  const colRel = new Float64Array(cols.length * 12), colSlept = new Float64Array(cols.length * 12);
+  const pinRel = new Float64Array(pinned.length * 3), pinSlept = new Float64Array(pinned.length * 3);
+  const xSlept = new Float64Array(n * 3), vRigid = new Float64Array(n * 3), upSlept = [0, 1, 0], wInv = I12();
+  let asleep = false, quietT = 0, watched = 0, fitting = false, shapeSeen = o.shapeScale;   // watched: frames seen since a reset (speeds need 2, changes of speed 3)
+  // everything that moves the cloth from outside, this frame: is it quiet, and has it moved away from where the cloth fell asleep?
+  function watch(dt: number): { quiet: boolean; moved: boolean } {
+    const M = ref.M, idt = 1 / dt;
+    inv12(M, wInv);
+    const m = wInv;
+    let acc = 0, speed = 0, drift = 0, carry = 0;
+    for (let k = 0; k < 12; k += 3) {
+      const px = refPts[k], py = refPts[k + 1], pz = refPts[k + 2];
+      const wx = M[0] * px + M[1] * py + M[2] * pz + M[3], wy = M[4] * px + M[5] * py + M[6] * pz + M[7], wz = M[8] * px + M[9] * py + M[10] * pz + M[11];
+      const vx = (wx - refPos[k]) * idt, vy = (wy - refPos[k + 1]) * idt, vz = (wz - refPos[k + 2]) * idt;
+      if (watched >= 2) acc = Math.max(acc, Math.hypot(vx - refVel[k], vy - refVel[k + 1], vz - refVel[k + 2]) * idt);
+      if (watched >= 1) carry = Math.max(carry, Math.hypot(vx - wind[0], vy - wind[1], vz - wind[2]));
+      refPos[k] = wx; refPos[k + 1] = wy; refPos[k + 2] = wz; refVel[k] = vx; refVel[k + 1] = vy; refVel[k + 2] = vz;
+    }
+    // a point given in the world, against the hips: its speed since the frame before, and how far it is from where it was asleep
+    const against = (wx: number, wy: number, wz: number, rel: Float64Array, slept: Float64Array, k: number) => {
+      const lx = m[0] * wx + m[1] * wy + m[2] * wz + m[3], ly = m[4] * wx + m[5] * wy + m[6] * wz + m[7], lz = m[8] * wx + m[9] * wy + m[10] * wz + m[11];
+      if (watched >= 1) speed = Math.max(speed, Math.hypot(lx - rel[k], ly - rel[k + 1], lz - rel[k + 2]) * idt);
+      if (asleep) drift = Math.max(drift, Math.hypot(lx - slept[k], ly - slept[k + 1], lz - slept[k + 2]));
+      rel[k] = lx; rel[k + 1] = ly; rel[k + 2] = lz;
+    };
+    for (let q = 0; q < cols.length; q++) {
+      const C = cols[q].M;
+      for (let k = q * 12, e = k + 12; k < e; k += 3) {
+        const px = colPts[k], py = colPts[k + 1], pz = colPts[k + 2];
+        against(C[0] * px + C[1] * py + C[2] * pz + C[3], C[4] * px + C[5] * py + C[6] * pz + C[7], C[8] * px + C[9] * py + C[10] * pz + C[11], colRel, colSlept, k);
+      }
+    }
+    for (let p = 0; p < pinned.length; p++) { const k = pinned[p] * 3; against(pinTarget[k], pinTarget[k + 1], pinTarget[k + 2], pinRel, pinSlept, p * 3); }
+    watched++;
+    // which way is up for the hips: asleep, the cloth hangs as it did when it fell asleep
+    const ux = m[1], uy = m[5], uz = m[9], ul = Math.hypot(ux, uy, uz) || 1;
+    const tilt = asleep ? Math.acos(Math.max(-1, Math.min(1, (ux * upSlept[0] + uy * upSlept[1] + uz * upSlept[2]) / ul))) : 0;
+    if (!asleep) { upSlept[0] = ux / ul; upSlept[1] = uy / ul; upSlept[2] = uz / ul; }
+    const calmAir = !wind[0] && !wind[1] && !wind[2], shapeSteady = Math.abs(o.shapeScale - shapeSeen) < 1e-3;
+    shapeSeen = o.shapeScale;
+    stats.watch = { accel: acc, speed, drift, tilt, air: carry };   // for tuning: what keeps the cloth awake
+    return { quiet: calmAir && carry < o.quietAir && shapeSteady && !grab && acc < o.quietAccel && speed < o.quietSpeed, moved: drift > o.wakeDist || tilt > o.wakeAngle };
+  }
+  function fallAsleep(): void {
+    asleep = true;
+    const m = wInv;   // the hips' inverse of this frame (from watch)
+    for (let k = 0; k < n * 3; k += 3) {
+      const px = x[k], py = x[k + 1], pz = x[k + 2];
+      xSlept[k] = m[0] * px + m[1] * py + m[2] * pz + m[3]; xSlept[k + 1] = m[4] * px + m[5] * py + m[6] * pz + m[7]; xSlept[k + 2] = m[8] * px + m[9] * py + m[10] * pz + m[11];
+    }
+    colSlept.set(colRel); pinSlept.set(pinRel);
+  }
+  function wake(): void { asleep = false; }
+  // asleep: every point where the hips carry it, at the speed they carry it
+  function stepAsleep(dt: number): void {
+    const M = ref.M, idt = 1 / dt;
+    for (let k = 0; k < n * 3; k += 3) {
+      const px = xSlept[k], py = xSlept[k + 1], pz = xSlept[k + 2];
+      const wx = M[0] * px + M[1] * py + M[2] * pz + M[3], wy = M[4] * px + M[5] * py + M[6] * pz + M[7], wz = M[8] * px + M[9] * py + M[10] * pz + M[11];
+      v[k] = (wx - x[k]) * idt; v[k + 1] = (wy - x[k + 1]) * idt; v[k + 2] = (wz - x[k + 2]) * idt;
+      x[k] = wx; x[k + 1] = wy; x[k + 2] = wz;
+    }
+    for (const i of pinned) { const k = i * 3; x[k] = pinTarget[k]; x[k + 1] = pinTarget[k + 1]; x[k + 2] = pinTarget[k + 2]; }
+    xp.set(x);
+  }
+  // how fast the hips carry each point this frame (what the cloth is calmed toward, and measured against)
+  function rigidSpeeds(dt: number): void {
+    const M = ref.M, P = ref.prev, m = wInv, idt = 1 / dt;
+    for (let k = 0; k < n * 3; k += 3) {
+      const px = x[k], py = x[k + 1], pz = x[k + 2];
+      const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
+      vRigid[k] = ((M[0] - P[0]) * lx + (M[1] - P[1]) * ly + (M[2] - P[2]) * lz + M[3] - P[3]) * idt;
+      vRigid[k + 1] = ((M[4] - P[4]) * lx + (M[5] - P[5]) * ly + (M[6] - P[6]) * lz + M[7] - P[7]) * idt;
+      vRigid[k + 2] = ((M[8] - P[8]) * lx + (M[9] - P[9]) * ly + (M[10] - P[10]) * lz + M[11] - P[11]) * idt;
+    }
+  }
+
   function step(dt: number): void {
     const t0 = performance.now();
-    const ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), aB = o.bend / (h * h), aL = o.shape / (h * h), aC = o.crease / (h * h);
+    const ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), aL = o.shape / (h * h), aC = o.crease / (h * h);
     const vmax = o.maxSpeed;
     rebuildsThisFrame = 0;
     if (!driven) followBody();
+    let calmK = 0;
+    if (o.sleep && !fitting) {
+      const { quiet, moved } = watch(dt);
+      if (asleep) {
+        if (quiet && !moved) { stepAsleep(dt); endFrame(t0); return; }
+        wake();
+        quietT = quiet ? o.calmAfter : 0;   // only drifted away (a slow shift of the weight): calm down again from here
+      } else quietT = quiet ? quietT + dt : 0;
+      if (quietT > o.calmAfter) {
+        calmK = o.calmDamping * Math.min(1, (quietT - o.calmAfter) / Math.max(1e-3, o.sleepAfter - o.calmAfter));
+        rigidSpeeds(dt);
+      }
+    } else if (asleep) wake();
     computeAero(dt);
-    const damp = Math.max(0, 1 - o.damping * h), air = Math.min(0.9, o.air * h);
+    const damp = Math.max(0, 1 - o.damping * h), air = Math.min(0.9, o.air * h), calm = Math.max(0, 1 - calmK * h);
     const gFrom = grab ? grab.prev.slice() : null;
     for (let s = 0; s < ns; s++) {
       const a = (s + 1) / ns;
@@ -580,8 +769,9 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
         }
         if (s === ns - 1) grab.prev = [tx, ty, tz];
       }
-      if (LL.length && s % o.shapeEvery === 0) solve(CL, LL, aL / (o.shapeEvery * o.shapeEvery));
-      solve(CB, LB, aB); solveCreases(aC); solve(CS, LS, aS);   // stretch last: it has the final say
+      if (LL.length && o.shapeScale > 0.01 && s % o.shapeEvery === 0) solve(CL, LL, aL / (o.shapeEvery * o.shapeEvery) / Math.min(1, o.shapeScale));
+      hinges(CB, TB, 0, AB, 1 / (h * h), invMass);
+      hinges(CD, TH, aC); solve(CS, LS, aS);   // stretch last: it has the final say
       if (o.thickness > 0) {
         if (s % o.selfEvery === 0) { if (pairsStale()) findPairs(); solveSelf(); }
       }
@@ -618,12 +808,27 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       // velocities
       const ih = 1 / h;
       for (let i = 0; i < n * 3; i++) v[i] = (x[i] - xp[i]) * ih * damp;
+      // calming down: the speed against what the hips carry dies out
+      if (calmK > 0) for (let i = 0; i < n * 3; i++) v[i] = vRigid[i] + (v[i] - vRigid[i]) * calm;
     }
+    if (calmK > 0) {
+      let fastest = 0;
+      for (let i = 0; i < n; i++) {
+        if (!w[i]) continue;
+        const k = i * 3;
+        fastest = Math.max(fastest, Math.hypot(v[k] - vRigid[k], v[k + 1] - vRigid[k + 1], v[k + 2] - vRigid[k + 2]));
+      }
+      if (fastest < o.sleepSpeed || quietT >= o.sleepAfter) fallAsleep();
+    }
+    endFrame(t0);
+  }
+  function endFrame(t0: number): void {
     ref.prev.set(ref.M);
     for (const col of cols) col.prev.set(col.M);
     for (const i of pinned) { const k = i * 3; pinPrev[k] = pinTarget[k]; pinPrev[k + 1] = pinTarget[k + 1]; pinPrev[k + 2] = pinTarget[k + 2]; }
     normals();
     stats.ms += (performance.now() - t0 - stats.ms) * 0.1;
+    stats.asleep = asleep;
   }
 
   // numbers for tuning: worst edge stretch, deepest point inside the body (beyond what it had at rest), fastest point
@@ -681,7 +886,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   function fitRestToGravity(iterations = 2, frames = 60, gain = 0.9): void {
     const target = new Float64Array(X0), wasDriven = driven;
     const dist = (i: number, j: number) => Math.hypot(target[i * 3] - target[j * 3], target[i * 3 + 1] - target[j * 3 + 1], target[i * 3 + 2] - target[j * 3 + 2]);
-    driven = true;
+    driven = true; fitting = true;
     const calm = () => { pairsValid = false; x.set(X0); xp.set(X0); v.fill(0); snapFrames(); normals(); };
     for (let it = 0; it < iterations; it++) {
       calm();
@@ -691,16 +896,16 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
         for (let c = 0; c < 3; c++) target[i * 3 + c] -= (x[i * 3 + c] - X0[i * 3 + c]) * gain;
       }
       for (let k = 0; k < LL.length; k++) LL[k] = dist(CL[k * 2], CL[k * 2 + 1]);
-      for (let k = 0; k < LB.length; k++) LB[k] = dist(CB[k * 2], CB[k * 2 + 1]);
+      for (let k = 0; k < TB.length; k++) TB[k] = foldAngle(target, CB[k * 4], CB[k * 4 + 1], CB[k * 4 + 2], CB[k * 4 + 3]);
       for (let k = 0; k < TH.length; k++) TH[k] = foldAngle(target, CD[k * 4], CD[k * 4 + 1], CD[k * 4 + 2], CD[k * 4 + 3]);
     }
     calm();
-    driven = wasDriven;
+    driven = wasDriven; fitting = false;
   }
 
   // back to the rest shape; a driver passes where the points are in the pose of the moment instead (`positions`)
   function reset(positions: ArrayLike<number> | null = null): void {
-    pairsValid = false;
+    pairsValid = false; asleep = false; quietT = 0; watched = 0; stats.asleep = false;
     endGrab(); v.fill(0);
     if (positions) x.set(positions);
     else {
@@ -725,11 +930,12 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   }
 
   return { o, n, nF, F, x, v, w, X0, nrm, map, body, bodyPrev, frames, snapFrames, fitRestToGravity, tPin,
+    get sleeping() { return asleep; },
     get driven() { return driven; }, set driven(d) { driven = d; }, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, pinned, rimLow, pinY, topY, botY, hemY,
-    solveCreases, CD, TH,
+    solveHinges: hinges, CD, TH, mass, fabric,
     knock,
     get grabbing() { return !!grab; },
     get grabPoint() { return grab ? grab.prev : null; },   // where the fingers are
     // how far the pinched cloth has been raised above where it hangs at rest
-    get grabLift() { return grab ? x[grab.centre * 3 + 1] - body.y - X0[grab.centre * 3 + 1] : 0; }, counts: { points: n, stretch: LS.length, bend: LB.length, crease: TH.length, shape: LL.length, pinned: pinned.length } };
+    get grabLift() { return grab ? x[grab.centre * 3 + 1] - body.y - X0[grab.centre * 3 + 1] : 0; }, counts: { points: n, stretch: LS.length, bend: TB.length, crease: TH.length, shape: LL.length, pinned: pinned.length } };
 }

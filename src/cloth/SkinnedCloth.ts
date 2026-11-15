@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { describePart } from './parts';
 import { weld, capRims, buildSDF, type DistanceGrid } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
+import type { FabricSpec } from './fabric';
 
 /**
  * 骨で動くメッシュ（SkinnedMesh）の一部を布にする。VRM に限らない。
@@ -85,6 +86,14 @@ export interface SkinnedClothOptions {
   cell?: number;
   /** ソルバーの設定（solver.ts の ClothOptions） */
   solver?: Partial<ClothOptions>;
+  /** 生地（fabric.ts の名前か、曲げ剛性 N·m と重さ kg/m²）。曲げにくさと重さが決まる。既定はスーツ地 */
+  fabric?: FabricSpec;
+  /**
+   * 左右の脚の [太ももの骨, ひざの骨]。指定すると、両方の太ももが上がった姿勢（座る・寝る・しゃがむ）で、スカートの
+   * 広がった形を覚えさせる力（solver の shapeScale）を抜く。布は体に沿って垂れ、形は体との当たりで決まる。
+   * 片脚だけ上げた（蹴り上げ）ときは抜かない。drapeWhenRaised = false で止める
+   */
+  legs?: [[THREE.Object3D, THREE.Object3D], [THREE.Object3D, THREE.Object3D]];
 }
 
 /** 風。velocity は吹いていく向きと速さ（m/s、ワールド座標） */
@@ -104,7 +113,11 @@ const SUBSTEP = 1 / 960;
 const MAX_SUBSTEPS = 16;
 
 const _m4 = new THREE.Matrix4();
-const _v = new THREE.Vector3();
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
+/** 太ももが真下からこの角度（ラジアン）を超えて上がり始めると、形を覚えさせる力を抜き始め、RAISED_TO で抜ききる */
+const RAISED_FROM = (45 * Math.PI) / 180, RAISED_TO = (70 * Math.PI) / 180;
+/** 抜く・戻すの時定数（秒）。1 フレームに dt / DRAPE_TIME ずつ寄る */
+const DRAPE_TIME = 0.4;
 const _up = new THREE.Vector3(0, 1, 0);
 
 /** リグの重み：[骨の番号, 重み] の並び */
@@ -164,7 +177,7 @@ export class SkinnedCloth {
     const options: SkinnedClothOptions = { ...SkinnedCloth.defaults, ...given, solver: { ...SkinnedCloth.defaults.solver, ...given.solver } };
     SkinnedCloth.skipped = '';
     const skip = (reason: string): null => { SkinnedCloth.skipped = reason; return null; };
-    const { mesh, freeFrom = 0.05, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {} } = options;
+    const { mesh, freeFrom = 0.05, sub = 'auto', edge = 0.015, maxTriangles = 20000, cell = 0.006, restFit = 2, solver = {}, fabric = 'suiting' } = options;
     let root = options.root ?? mesh as THREE.Object3D;
     if (!options.root) while (root.parent) root = root.parent;
     root.updateMatrixWorld(true);
@@ -284,7 +297,7 @@ export class SkinnedCloth {
     let px = 0, pz = 0, pn = 0;
     for (let i = 0; i < sp.position.length; i += 3) if (sp.position[i + 1] > topY - 0.066 * len) { px += sp.position[i]; pz += sp.position[i + 2]; pn++; }
 
-    const cloth = createCloth({ position: sp.position, index: sp.index, colliders, pivot: [px / pn, pz / pn], free: sp.extra, opts: solver });
+    const cloth = createCloth({ position: sp.position, index: sp.index, colliders, pivot: [px / pn, pz / pn], free: sp.extra, opts: solver, fabric });
     cloth.driven = true;
     if (cloth.n === cloth.pinned.length) return skip('布になる点がない');
     // モデルの形は、重力で垂れた後の形。そこからさらに垂れないよう、垂れる分を見込んで覚える形を補正する
@@ -323,10 +336,12 @@ export class SkinnedCloth {
     const rep = new Int32Array(cloth.n).fill(-1);
     for (let r = 0; r < nR; r++) if (rep[cloth.map[r]] < 0) rep[cloth.map[r]] = r;
 
-    return new SkinnedCloth(root, mesh, mesh.geometry, geometry, cloth, hips, hipsIndex, pieces.map((p) => p.bone), bind, skin, skinHeld, rep, {
+    const made = new SkinnedCloth(root, mesh, mesh.geometry, geometry, cloth, hips, hipsIndex, pieces.map((p) => p.bone), bind, skin, skinHeld, rep, {
       mesh: sk.materialName || sk.name, splits, cloth: cloth.n - cloth.pinned.length, held: cloth.pinned.length,
       pieces: pieces.map((p) => ({ bone: p.bone.name, triangles: p.triangles, grid: p.grid })),
     });
+    made.legs = options.legs ?? null;
+    return made;
   }
 
   /** 今の骨の姿勢で、リグが点 i を置く位置（skeleton.update() の後） */
@@ -369,6 +384,31 @@ export class SkinnedCloth {
   }
 
   /** スカート全体を、今リグが置いている位置へ置き直して、そこから始める（読み込み後・カットで姿勢が飛んだ後） */
+  /** 左右の脚の [太もも, ひざ]（options.legs） */
+  private legs: SkinnedClothOptions['legs'] | null = null;
+  /** 両方の太ももが上がった姿勢で、広がった形を覚えさせる力を抜くか（legs があるときだけ効く） */
+  public drapeWhenRaised = true;
+  /** 太ももの上がり具合（0 = 立っている、1 = 座る・寝る）。抜く度合いはこれに時定数 0.4 秒で寄る（1 秒で 9 割） */
+  public raised = 0;
+
+  /** 両方の太ももが、真下からどれだけ上がっているか（0〜1）。下がっているほうの脚で決める */
+  private legsRaised(): number {
+    if (!this.legs) return 0;
+    let low = Infinity;
+    for (const [thigh, knee] of this.legs) {
+      thigh.getWorldPosition(_v); knee.getWorldPosition(_v2);
+      const d = _v2.sub(_v), l = d.length();
+      if (l < 1e-6) return 0;
+      low = Math.min(low, Math.acos(Math.max(-1, Math.min(1, -d.y / l))));   // 0 = straight down
+    }
+    // 45 度までは立ち・歩き（走りで前の脚が 50 度）、70 度で座る（太ももがほぼ水平）
+    const t = Math.max(0, Math.min(1, (low - RAISED_FROM) / (RAISED_TO - RAISED_FROM)));
+    return t * t * (3 - 2 * t);
+  }
+
+  /** 外から動かすものがなく、布が止まって計算を休んでいるか（solver の sleep。cloth.o.sleep = false で止めない） */
+  get sleeping(): boolean { return this.cloth.sleeping; }
+
   settle(): void {
     this.readRig();
     for (let i = 0; i < this.cloth.n; i++) this.pose(i, this.posed, i * 3, this.skin);
@@ -421,6 +461,12 @@ export class SkinnedCloth {
       }
     }
     const dt = Math.min(delta, 1 / 30);
+    if (this.legs) {
+      const goal = this.drapeWhenRaised ? this.legsRaised() : 0;
+      this.raised += (goal - this.raised) * Math.min(1, dt / DRAPE_TIME);
+      if (Math.abs(goal - this.raised) < 1e-3) this.raised = goal;
+      this.cloth.o.shapeScale = 1 - this.raised;
+    }
     // 速いフレーム（120Hz など）では減らす。遅いフレームでは増やさない：増やすと計算が延びてさらに遅くなる
     // （36fps のとき 26 サブステップになり、布の計算が 4ms から 18ms になった）
     this.cloth.o.substeps = Math.max(4, Math.min(MAX_SUBSTEPS, Math.round(dt / SUBSTEP)));

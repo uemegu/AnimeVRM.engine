@@ -13,7 +13,7 @@ import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
-import { createVrmGarments, type GarmentCloth } from '../cloth/vrm';
+import { createVrmGarments, type GarmentCloth, type GarmentSpec } from '../cloth/vrm';
 import { SkinnedCloth, type ClothWind } from '../cloth/SkinnedCloth';
 import { WetDrips } from '../avatar/wetDrips';
 import { AvatarEffects } from './AvatarEffects';
@@ -281,6 +281,10 @@ export interface StageAvatarOptions {
   clothDent?: boolean;
   /** スカートを布として動かす（既定 false） */
   skirtCloth?: boolean;
+  /** 布が止まったら眠らせて計算を休む（既定 true） */
+  clothSleep?: boolean;
+  /** 布にする服（材質名かメッシュ名 → 生地など。cloth/vrm.ts の GarmentSpec）。書いた服だけを布にする */
+  garments?: Record<string, GarmentSpec>;
 }
 
 export class StageAvatar {
@@ -305,6 +309,10 @@ export class StageAvatar {
   /** 上着の布（cloth/knit.ts）の設定を試すとき用。作る前に入れる */
   public static knitOptions: Record<string, unknown> = {};
   private skirtClothEnabled: boolean;
+  private clothSleep: boolean;
+  /** 布を作ったか（createCloths は 1 回だけ） */
+  private clothsCreated = false;
+  private readonly garments: Record<string, GarmentSpec>;
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
   private wetDrips: WetDrips | null = null;
@@ -392,6 +400,8 @@ export class StageAvatar {
     this.handClearanceMode = options.handClearance ?? 'precise';
     this.clothDentEnabled = options.clothDent ?? true;
     this.skirtClothEnabled = options.skirtCloth ?? false;
+    this.clothSleep = options.clothSleep ?? true;
+    this.garments = options.garments ?? {};
   }
 
   public async load(modelUrl: string, defaultAnimationUrl: string | null = idleMotionUrl()): Promise<VRM> {
@@ -607,15 +617,31 @@ export class StageAvatar {
 
   /** 布にできる服（スカートと、裾に揺れものが入った上着）を布にする */
   private createCloths(vrm: VRM): void {
-    const cloths = createVrmGarments(vrm, {}, StageAvatar.knitOptions);
+    // 作るのは 1 回だけ（布は作ったときの形を覚えるので、作り直すと布に変えた後の形を覚えてしまう。指定が上着だけで
+    // skirtCloth が null のままでも、作り直さない）
+    if (this.clothsCreated) return;
+    this.clothsCreated = true;
+    const cloths = createVrmGarments(vrm, this.garments, { knit: StageAvatar.knitOptions });
     this.skirtCloth = (cloths.find((c) => c instanceof SkinnedCloth) as SkinnedCloth | undefined) ?? null;
     this.otherCloths = cloths.filter((c) => c !== this.skirtCloth);
+    this.setClothSleep(this.clothSleep);
+  }
+
+  /** 布が止まったら眠らせて計算を休むか（スカートと上着の両方） */
+  public setClothSleep(enabled: boolean): void {
+    this.clothSleep = enabled;
+    if (this.skirtCloth) this.skirtCloth.cloth.o.sleep = enabled;
+    for (const cloth of this.otherCloths) {
+      if (cloth instanceof SkinnedCloth) { cloth.cloth.o.sleep = enabled; continue; }   // 2 着目からの吊る服
+      const knit = (cloth as { knit?: { o: { sleep: boolean } } }).knit;
+      if (knit) knit.o.sleep = enabled;
+    }
   }
 
   /** スカートを布として動かすかを切り替える。切ると揺れものの骨で動くスカートに戻る */
   public setSkirtCloth(enabled: boolean): void {
     this.skirtClothEnabled = enabled;
-    if (enabled && !this.skirtCloth && this.vrm) {
+    if (enabled && !this.clothsCreated && this.vrm) {
       // 布は読み込み時の姿勢（T ポーズ）の形を覚える。途中から入れるときは、今の姿勢の形が元になる
       this.createCloths(this.vrm);
     }
