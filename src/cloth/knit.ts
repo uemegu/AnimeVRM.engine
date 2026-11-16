@@ -112,7 +112,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
                          // that vertex's plane (fading out over the next 3 cm: switched off at once, the loose shoulders of a wide top
                          // crossed the line back and forth standing still)
     stretch: 0,          // compliance of the edges (with 3e-7 and two passes a step the knit hung 5% longer than it is)
-    ease: 1.2,           // edges running around the body are this much longer than in the fitted mesh: the knit's looseness.
+    ease: 1.2,           // edges running around the body may be this much longer than in the fitted mesh: the knit's looseness
+                         // (how far it gives; it is pushed back out only when shorter than fitted: see LSc).
                          // What gravity can do is set by this: the fitted knit is a snug tube, and at 1.08 on every edge the front
                          // could hang 7 cm at the hem bent forward 80 degrees (2.7 cm standing) however the other limits were set
     neckBoth: true,      // true: only edges with both ends that near the rim are taut (the rim's own line), not the ones leading away from it
@@ -125,10 +126,23 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     armFrom: 0.17,       // |x| beyond which an edge is on a sleeve (rest pose)
     spacing: 0.022,      // metres between the simulated samples along the fabric (rims: 0.6 of it)
     fabric: 'jerseyOuter',   // the fabric (fabric.ts): its bending rigidity and weight set how the knit bends
+    // the air, as on the skirt (solver.ts computeAero): per triangle of samples, pressure drag growing with the square of
+    // the speed through the air along its normal, 0.5 * 1.2 kg/m3 * Cd 1.2 / the fabric's weight per area (drag: null takes
+    // that), capped at maxAero m/s2. (Until 2026-11-16 the knit had no air at all: walking along, the front of a loose
+    // T-shirt kept the shape it was modelled in, standing out from the belly, where the air presses it back.)
+    drag: null, maxAero: 80,
+    // a face on the body's lee (downstream of the air as the body meets it: the back of a top walking forward) sits in the
+    // body's wake: of the air going past the body only this share reaches it, the rest moves along with the body. (The
+    // skirt's `shield`, 0.3. Without it, walking forward blew the back of a T-shirt out behind as hard as it pressed the front.)
+    shield: 0.3,
     minEdge: 0,     // points closer than this along an edge are merged (Tripo leaves sub-millimetre triangles: strain 400%, never at rest)
     maxStrain: 1.06,     // an edge never gets longer than this times its rest length...
     pullStrain: 1.4,     // ...except around a pinch while it is held: a knit gives
-    stretchIters: 1,
+    stretchIters: 4,     // passes over the edges in each of the contactIters rounds. With one, the edges lost to the leash, the hang and
+                         // the pieces, all kept exactly after them: in a breakdance the neck's rim, whose edges have no ease, was
+                         // pulled out to twice its length (36 -> 70 cm, 105 cm at most) and stayed so, and the top hung off one
+                         // shoulder with the skin and the strap under it showing. With four: 54 cm at most, back at once
+                         // (2/3 passes: 80/70 cm). 1 ms more a step (2.4 -> 3.4 ms). `compress` is shared out over the passes.
     compress: 0.1,       // how much of an edge's shortening is undone (1: an edge keeps its length both ways, and the knit holds
                          // its fitted shape like a shell; from Codex's review, 2026-11-14)
     pieceLeash: 0,       // only points with a leash longer than this are tested against the rigid pieces (the others have their skin plane)
@@ -176,12 +190,18 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     // shoulders of an idle motion woke it every 1-2 s: asleep 45-70% of the time.) The skirt waking does not wake it: the
     // skirt then mostly settles again after a slow shift of the weight, a few millimetres under the knit's hem.
     // Off (sleep: false) when it must keep moving with nothing driving it.
+    quietAir: 0.3,      // m/s: the body carries the knit through the air no faster than this to be quiet (and no wind)
     sleep: true, quietAccel: 2, calmAfter: 0.3, sleepAfter: 1.2, sleepSpeed: 0.03, calmDamping: 12, wakeDist: 0.004,
-    // Asleep, the offsets from the targets die out at this rate (1/s; 0: kept as they fell asleep), so a knit at rest is
-    // the fitted shape the bones give, as the model was made. The user: 「静止してなら揺れるな」. Standing still with the
-    // arms down, the simulated blazer had drifted 29 mm on average from its targets (its lapels 0.1-1 m), and lay there
-    // crumpled and open while the targets themselves were the blazer as modelled. At 3 it is back within 0.5 mm in 2.5 s.
-    restToFit: 3,
+    // With the body about still, the offsets from the targets die out at this rate (1/s; 0: not at all), so a knit at rest
+    // comes to the fitted shape the bones give, as the model was made. The user: 「静止してなら揺れるな」. Standing still
+    // with the arms down, the simulated blazer had drifted 29 mm on average from its targets (its lapels 0.1-1 m), and lay
+    // there crumpled and open while the targets themselves were the blazer as modelled. At full rate below fitStill (m/s,
+    // how fast the body carries the knit through the air), none from quietAir up, eased in and out over fitEase seconds.
+    // It works on the knit awake, against everything else on it, and the knit falls asleep in the shape that comes to;
+    // asleep the offsets are kept. (Asleep only, until 2026-11-16, they died out to nothing asleep, but awake the knit
+    // came to rest a few millimetres off, or 15 mm held by `rest` after walking: each small turn of an arm woke it and it
+    // swung back out. Standing still, the T-shirt swelled and shrank like breathing.)
+    restToFit: 3, fitStill: 0.1, fitEase: 0.3,
     ...opts,
   };
   vrm.scene.updateMatrixWorld(true);
@@ -382,6 +402,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const rimC = new Uint8Array(nc); sampleFine.forEach((f, c) => { rimC[c] = openRim[f]; });
   const CS = Uint32Array.from(csC), LS = Float64Array.from({ length: csC.length / 2 }, (_, k) => dc(csC[k * 2], csC[k * 2 + 1]));
   const { C: HC, T: HT, alphas: HA } = fabricHinges(X0c, triC, fabric.bending);
+  const TC = Uint32Array.from(triC), dragK = o.drag ?? 0.72 / fabric.weight;
   const invMassC = Float64Array.from(massC, (m_) => 1 / m_);
   const ST = new Uint32Array(0), LST = new Float64Array(0);   // the seams are in the samples' graph already
   // from here on "points" are the samples
@@ -586,6 +607,17 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     return { plane, read };
   }
   const PS = planeSet(skinBody, skinVert), plane = PS.plane, readPlanes = PS.read;
+  const planeLast = new Float64Array(plane.length), planeEnd = new Float64Array(plane.length);
+  const planeStep = new Float64Array(plane.length), planeS = new Float64Array(plane.length);
+  // out = the planes between A and B at a (0 to 1): the points along the line, the normals along it and made unit again
+  // (the contact takes the dot with the normal for a distance), the end's normal where the two nearly cancel
+  function lerpPlanes(out, A, B, a) {
+    for (let q = 0; q < out.length; q += 6) {
+      for (let e = 0; e < 3; e++) out[q + e] = A[q + e] + (B[q + e] - A[q + e]) * a;
+      const nx = A[q + 3] + (B[q + 3] - A[q + 3]) * a, ny = A[q + 4] + (B[q + 4] - A[q + 4]) * a, nz = A[q + 5] + (B[q + 5] - A[q + 5]) * a, l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (l > 1e-6) { out[q + 3] = nx / l; out[q + 4] = ny / l; out[q + 5] = nz / l; } else { out[q + 3] = B[q + 3]; out[q + 4] = B[q + 4]; out[q + 5] = B[q + 5]; }
+    }
+  }   // where the last step left them, and this substep's (step)   // the skin planes the last step ended on, and this frame's (update)
   // For the sit: the skin UNDER each carried vertex (the body vertex nearest across, below it by up to 7 cm, facing up), not
   // the one nearest to it: beside the neck the nearest skin is the neck's side, and the collar stayed 2 cm over the shoulder.
   const sitPts = [], sitBody = [], sitVert = [];
@@ -611,6 +643,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   // ---- state ----
   const x = new Float64Array(X0), xp = new Float64Array(X0), v = new Float64Array(n * 3), w = new Float64Array(n).fill(1);
   const tgt = new Float64Array(X0), tgtPrev = new Float64Array(X0), nrm = new Float64Array(n * 3);
+  const tgtStart = new Float64Array(n * 3), tgtEnd = new Float64Array(n * 3), xF0 = new Float64Array(n * 3);   // the targets a frame starts and ends on (update)
+  const colStart = cols.map(() => new Float64Array(12)), colEnd = cols.map(() => new Float64Array(12));   // and the body's pieces
   const boost = new Float64Array(n);   // extra leash around a pinch
   let boostOn = 0;                     // 1 while held, decays after
   let boostT = 0, calm = 0;            // time since let go (0..1 of grabReturn); the extra damping's strength (1..0)
@@ -685,7 +719,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   function moveGrab(px, py, pz) { if (grab) grab.target = [px, py, pz]; }
   function endGrab() { if (grab) { for (const i of grab.ids) w[i] = 1; grab = null; } }
 
-  function solve(C, L, alpha, limit, comp = 1) {
+  // Lc (optional): an edge is pushed back out only when shorter than this, not than L (between the two it is slack)
+  function solve(C, L, alpha, limit, comp = 1, Lc = null) {
     const give = (o.pullStrain - o.maxStrain) / o.grabBoost * boostOn;
     for (let q = 0; q < L.length; q++) {
       const i = C[q * 2], j = C[q * 2 + 1], wi = w[i], wj = w[j], ws = wi + wj;
@@ -696,7 +731,11 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       const lim = limit ? limit + give * Math.max(boost[i], boost[j]) : 0;
       if (limit && l > lim * L[q]) { heldBy[i] |= 64; heldBy[j] |= 64; }
       const lam = limit && l > lim * L[q] ? Math.max((l - L[q]) / ((ws + alpha + (lim > limit ? 0.5 : 0)) * l), (l - lim * L[q]) / (ws * l)) : (l - L[q]) / ((ws + alpha + (lim > limit ? 0.5 : 0)) * l);
-      const lm = lam < 0 ? lam * comp : lam;   // an edge shorter than its length is pushed back only by `comp` of the way: fabric folds
+      let lm = lam;
+      if (lam < 0) {   // an edge shorter than its length is pushed back only by `comp` of the way: fabric folds
+        const lc = Lc ? Lc[q] : L[q];
+        lm = l < lc ? (l - lc) / ((ws + alpha) * l) * comp : 0;
+      }
       x[ki] += dx * lm * wi; x[ki + 1] += dy * lm * wi; x[ki + 2] += dz * lm * wi; x[kj] -= dx * lm * wj; x[kj + 1] -= dy * lm * wj; x[kj + 2] -= dz * lm * wj;
     }
   }
@@ -745,7 +784,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     const d = (x[k] - SK.x[j]) * nx + (x[k + 1] - SK.x[j + 1]) * ny + (x[k + 2] - SK.x[j + 2]) * nz;
     if (d < o.skirtGap) { const p = o.skirtGap - d; x[k] += nx * p; x[k + 1] += ny * p; x[k + 2] += nz * p; }
   }
-  const LSe = new Float64Array(LS), hangE = new Float64Array(hangLen);
+  const LSe = new Float64Array(LS), LSc = new Float64Array(LS), hangE = new Float64Array(hangLen);
   // The neck's rim is taut: no ease on the edges within neckTaut of it along the fabric (rising to the full ease over the
   // same distance again). With the ease everywhere the V's edge bellied 5-13 mm forward off the chest standing upright;
   // its leash is untouched, so bent forward it still hangs away.
@@ -881,6 +920,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const around = { ids: [], side: [], turn: 0, moves: 0 };
   const axisCols = ['hips', 'spine', 'chest', 'upperChest', 'neck', 'head'].map((nm) => cols.find((c) => c.name === nm)).filter(Boolean);
   const chestCol = cols.find((c) => c.name === 'upperChest') || cols.find((c) => c.name === 'chest');
+  const hipsCol = cols.find((c) => c.name === 'hips');
   if (o.tubeSide && chestCol && axisCols.length >= 3) {
     let cx = 0, cz = 0, cnt = 0; const top = armY - o.tubeBelowArms, M = chestCol.M;
     for (let i = 0; i < n; i++) if (nearPiece[i] >= 0 && /^(hips|spine|chest|upperChest)$/.test(cols[nearPiece[i]].name) && X0[i * 3 + 1] < top) { around.ids.push(i); cx += X0[i * 3]; cz += X0[i * 3 + 2]; cnt++; }
@@ -960,7 +1000,50 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   function ball(col) { const c = col.cur, l = col.bc, w_ = col.bw; w_[0] = c[0] * l[0] + c[1] * l[1] + c[2] * l[2] + c[3]; w_[1] = c[4] * l[0] + c[5] * l[1] + c[6] * l[2] + c[7]; w_[2] = c[8] * l[0] + c[9] * l[1] + c[10] * l[2] + c[11]; }
   const heldBy = new Uint8Array(n);   // what held each sample in the last step: 1 leash, 2 hang, 4 skin plane, 8 piece, 16 skirt, 32 kept at rest, 64 an edge at its limit
   const stats = { steps: 0, ms: 0, rig: 0, out: 0, t: [0, 0, 0, 0] };   // t: predict+grab, edges, body+skirt+leash, the rest (ms a frame, eased)
-  function step(dt) {
+  // ---- the air (once a step): see `drag` ----
+  const aero = new Float64Array(n * 3), aeroW = new Float64Array(n), windK = [0, 0, 0];
+  // dt: this step's length; span: how much of the world's time it stands for (more than dt on a frame cut at 2.5 steps).
+  // The air is the world's: the body's speed is its targets' move over span, and the knit's own speed is taken at the same
+  // rate (with the body's speed over dt, a cut frame of 100 ms walking at 1.3 m/s took the body for 3.1 m/s, and the lee
+  // pushed a top's back forward)
+  function computeAero(dt, span = dt) {
+    aero.fill(0); aeroW.fill(0);
+    const idt = 1 / span, rv = dt / span;
+    // The body's own line (hips to chest, and on down past the hips): a face's outside is its side away from that line.
+    // (Away from the world's vertical through the hips until 2026-11-16: bent forward, the back ahead of the hips, the back's
+    // faces were taken as facing in, and the air on them as the lee's.)
+    const H = hipsCol ? hipsCol.M : null, C_ = chestCol && chestCol !== hipsCol ? chestCol.M : null;
+    const lx0 = H ? H[3] : 0, ly0 = H ? H[7] : 0, lz0 = H ? H[11] : 0;
+    let ldx = C_ ? C_[3] - lx0 : 0, ldy = C_ ? C_[7] - ly0 : 1, ldz = C_ ? C_[11] - lz0 : 0;
+    { const L = Math.sqrt(ldx * ldx + ldy * ldy + ldz * ldz); if (L > 1e-6) { ldx /= L; ldy /= L; ldz /= L; } else { ldx = 0; ldy = 1; ldz = 0; } }
+    for (let f = 0; f < TC.length; f += 3) {
+      const i = TC[f], j = TC[f + 1], l = TC[f + 2], a = i * 3, b = j * 3, c = l * 3;
+      const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2], vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const A2 = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (A2 < 1e-12) continue;
+      nx /= A2; ny /= A2; nz /= A2;
+      // the body's speed here, and the air against the body
+      const bx = ((tgt[a] - tgtPrev[a]) + (tgt[b] - tgtPrev[b]) + (tgt[c] - tgtPrev[c])) / 3 * idt, by = ((tgt[a + 1] - tgtPrev[a + 1]) + (tgt[b + 1] - tgtPrev[b + 1]) + (tgt[c + 1] - tgtPrev[c + 1])) / 3 * idt, bz = ((tgt[a + 2] - tgtPrev[a + 2]) + (tgt[b + 2] - tgtPrev[b + 2]) + (tgt[c + 2] - tgtPrev[c + 2])) / 3 * idt;
+      const ux_ = windK[0] - bx, uy_ = windK[1] - by, uz_ = windK[2] - bz;
+      const ox = (x[a] + x[b] + x[c]) / 3 - lx0, oy = (x[a + 1] + x[b + 1] + x[c + 1]) / 3 - ly0, oz = (x[a + 2] + x[b + 2] + x[c + 2]) / 3 - lz0, od = ox * ldx + oy * ldy + oz * ldz;
+      const out = nx * (ox - ldx * od) + ny * (oy - ldy * od) + nz * (oz - ldz * od) >= 0 ? 1 : -1;
+      const k = (nx * ux_ + ny * uy_ + nz * uz_) * out > 0 ? o.shield : 1;   // the air leaves through this face: the lee
+      const rx = (v[a] + v[b] + v[c]) / 3 * rv - (bx + ux_ * k), ry = (v[a + 1] + v[b + 1] + v[c + 1]) / 3 * rv - (by + uy_ * k), rz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3 * rv - (bz + uz_ * k);
+      const vn = rx * nx + ry * ny + rz * nz, m = -dragK * Math.abs(vn) * vn * A2;
+      for (const q of [a, b, c]) { aero[q] += nx * m; aero[q + 1] += ny * m; aero[q + 2] += nz * m; }
+      aeroW[i] += A2; aeroW[j] += A2; aeroW[l] += A2;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!aeroW[i]) continue;
+      const k = i * 3, q = 1 / aeroW[i];
+      let ax = aero[k] * q, ay = aero[k + 1] * q, az = aero[k + 2] * q;
+      const L = Math.sqrt(ax * ax + ay * ay + az * az);
+      if (L > o.maxAero) { const r = o.maxAero / L; ax *= r; ay *= r; az *= r; }
+      aero[k] = ax; aero[k + 1] = ay; aero[k + 2] = az;
+    }
+  }
+  function step(dt, span = dt) {
     const t0 = performance.now(), ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), damp = Math.max(0, 1 - (o.damping + sleepCalm) * h), ih = 1 / h;
     if (grab) { boostT = 0; boostOn = 1; calm = 1; }
     else {
@@ -979,6 +1062,11 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       // ...but no more than rigStretch times: a VRoid top's hem hangs on the legs' bones, and with the legs apart its edges
       // were allowed three times their length, which is no edge at all (neighbouring vertices 2 cm apart from frame to frame)
       LSe[q] = Math.max(LS[q] * easeE[q], Math.min(lt, LS[q] * easeE[q] * o.rigStretch));
+      // The ease is how far the knit may give, not how big it wants to be: it is pushed back out only when shorter than the
+      // bones make it now (the fitted shape). (Pushed out to the eased length until 2026-11-16, the fitted knit's edges
+      // around the body were all 17% short, and awake the whole T-shirt swelled: 7 mm in the first frame awake, front and
+      // back, and asleep it went back to the fitted shape. Standing still it swelled and shrank like breathing.)
+      LSc[q] = Math.min(lt, LSe[q]);
     }
     for (let i = 0; i < n; i++) {
       const sI = hangFrom[i]; if (sI < 0 || sI === i) continue;
@@ -986,6 +1074,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       hangE[i] = Math.max(hangLen[i] + hangSlack[i], Math.min(lt * 1.02, hangLen[i] * o.rigStretch));
     }
     const calmK = grab ? 0 : o.calm * calm / o.grabBoost;
+    // `compress` is for a round of the edges, however many passes it takes (see stretchIters)
+    const compressPass = 1 - Math.pow(1 - Math.min(1, o.compress), 1 / Math.max(1, o.stretchIters));
     const gFrom = grab ? grab.prev.slice() : null;
     const idtF = 1 / dt;
     // How much of the body's own change of speed the knit feels as inertia. The rest is given to it at once: each point's
@@ -994,14 +1084,17 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     if (o.inertia < 1) for (let k = 0; k < n * 3; k++) { const tv = (tgt[k] - tgtPrev[k]) * idtF; if (w[k / 3 | 0]) v[k] += (1 - o.inertia) * (tv - tvPrev[k]); tvPrev[k] = tv; }
     const tt = [0, 0, 0, 0]; let tm = performance.now(); const lap = (q) => { const now = performance.now(); tt[q] += now - tm; tm = now; };
     for (let i = 0; i < n; i++) skNear[i] = SK.on && x[i * 3 + 1] < SK.top + 0.02 ? findSkirt(i) : -1;
+    computeAero(dt, span);
     for (let s = 0; s < ns; s++) {
       const a = (s + 1) / ns;
+      // the skin planes too, from where the last step left them (as the pieces and the targets are)
+      lerpPlanes(planeS, planeStep, plane, a);
       for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); for (let q = 0; q < 12; q++) col.cur[q] = col.prev[q] + (col.M[q] - col.prev[q]) * a; inv12(col.cur, col.inv); ball(col); }
       for (let i = 0; i < n; i++) {
         const k = i * 3;
         xp[k] = x[k]; xp[k + 1] = x[k + 1]; xp[k + 2] = x[k + 2];
         if (!w[i]) continue;
-        v[k + 1] += o.gravity * h;
+        v[k] += aero[k] * h; v[k + 1] += (o.gravity + aero[k + 1]) * h; v[k + 2] += aero[k + 2] * h;
         const sp = Math.sqrt(v[k] * v[k] + v[k + 1] * v[k + 1] + v[k + 2] * v[k + 2]);
         if (sp > o.maxSpeed) { const r = o.maxSpeed / sp; v[k] *= r; v[k + 1] *= r; v[k + 2] *= r; }
         x[k] += v[k] * h; x[k + 1] += v[k + 1] * h; x[k + 2] += v[k + 2] * h;
@@ -1023,7 +1116,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       // fabric drawn taut over the chest (a VRoid top upside down, its hem's weight on it) went in with the edges and out
       // with the skin every substep and never came to rest while the body moved at all
       for (let ci = 0; ci < o.contactIters; ci++) {
-      for (let it = 0; it < o.stretchIters; it++) solve(CS, LSe, aS, o.maxStrain, o.compress);
+      for (let it = 0; it < o.stretchIters; it++) solve(CS, LSe, aS, o.maxStrain, compressPass, LSc);
       // hang: not further from its support than the way there along the fabric (longer around a pinch while it is held)
       for (let i = 0; i < n; i++) {
         const sI = hangFrom[i];
@@ -1033,13 +1126,13 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       }
       for (let i = 0; i < n; i++) {
         const t = sPl[i]; if (t < 0 || !w[i] || o.noSkin) continue;
-        const k = i * 3, q = t * 6, ex = x[k] - plane[q], ey = x[k + 1] - plane[q + 1], ez = x[k + 2] - plane[q + 2], d = ex * plane[q + 3] + ey * plane[q + 4] + ez * plane[q + 5];
+        const k = i * 3, q = t * 6, ex = x[k] - planeS[q], ey = x[k + 1] - planeS[q + 1], ez = x[k + 2] - planeS[q + 2], d = ex * planeS[q + 3] + ey * planeS[q + 4] + ez * planeS[q + 5];
         // the plane is the skin only near its own vertex: a point that has travelled along the body (a top upside down) is
         // left to the rigid pieces. (Held to the plane of the skin it lay on at rest wherever it went, it was pushed out of
         // a plane that is not there, against its edges.)
         const far = Math.sqrt(Math.max(0, ex * ex + ey * ey + ez * ez - d * d)) - lat0[t] - o.skinReach;
         if (far > 0.03) continue;
-        if (d < skinGap[t]) { heldBy[i] |= 4; const push = (skinGap[t] - d) * (far > 0 ? 1 - far / 0.03 : 1); x[k] += plane[q + 3] * push; x[k + 1] += plane[q + 4] * push; x[k + 2] += plane[q + 5] * push; }
+        if (d < skinGap[t]) { heldBy[i] |= 4; const push = (skinGap[t] - d) * (far > 0 ? 1 - far / 0.03 : 1); x[k] += planeS[q + 3] * push; x[k + 1] += planeS[q + 4] * push; x[k + 2] += planeS[q + 5] * push; }
       }
       }
       lap(1);
@@ -1079,11 +1172,19 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
           let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1; gx /= gl; gy /= gl; gz /= gl;
           // The trunk's fabric leaves an arm on the body's side of it, whichever surface is nearer (see armsInward): toward the
-          // nearest place on the chest -> head line, across the arm.
+          // nearest place on the body's axis, across the arm. Above the chest that is the chest -> head line. Below it, the
+          // hips -> chest line, carried on down past the hips: until 2026-11-16 a point below the chest was sent to the chest
+          // itself, mostly upward, and the sides of a T-shirt long enough to reach the hands were lifted 9 cm onto the hanging
+          // arms; the hem, one ring, then pulled the front up and in, and the front stood out round over the belly
           if (o.armsInward && isTrunk[i] && isLimbCol[cl[q]] && chestCol) {
             const cc = chestCol.cur, hc = (axisCols[axisCols.length - 1] || chestCol).cur, ex = hc[3] - cc[3], ey = hc[7] - cc[7], ez = hc[11] - cc[11];
-            const tt = Math.min(1.6, Math.max(0, ((px - cc[3]) * ex + (py - cc[7]) * ey + (pz - cc[11]) * ez) / (ex * ex + ey * ey + ez * ez || 1e-9)));
-            let ix = cc[3] + ex * tt - px, iy = cc[7] + ey * tt - py, iz = cc[11] + ez * tt - pz; const il = Math.sqrt(ix * ix + iy * iy + iz * iz);
+            let ox = cc[3], oy = cc[7], oz = cc[11], tt = ((px - cc[3]) * ex + (py - cc[7]) * ey + (pz - cc[11]) * ez) / (ex * ex + ey * ey + ez * ez || 1e-9);
+            if (tt < 0 && hipsCol && hipsCol !== chestCol) {
+              const bc = hipsCol.cur, fx_ = cc[3] - bc[3], fy_ = cc[7] - bc[7], fz_ = cc[11] - bc[11];
+              const u = Math.min(1, ((px - bc[3]) * fx_ + (py - bc[7]) * fy_ + (pz - bc[11]) * fz_) / (fx_ * fx_ + fy_ * fy_ + fz_ * fz_ || 1e-9));
+              ox = bc[3] + fx_ * u; oy = bc[7] + fy_ * u; oz = bc[11] + fz_ * u;
+            } else { tt = Math.min(1.6, Math.max(0, tt)); ox += ex * tt; oy += ey * tt; oz += ez * tt; }
+            const ix = ox - px, iy = oy - py, iz = oz - pz, il = Math.sqrt(ix * ix + iy * iy + iz * iz);
             if (il > 0.01) { gx = ix / il; gy = iy / il; gz = iz / il; }
           }
           const push = col.margin[i] - sd; heldBy[i] |= 8;
@@ -1170,7 +1271,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       }
     }
     for (const col of cols) col.prev.set(col.M);
-    tgtPrev.set(tgt);
+    tgtPrev.set(tgt); planeStep.set(plane);
     lap(3); for (let q = 0; q < 4; q++) stats.t[q] += (tt[q] - stats.t[q]) * 0.1;
     stats.ms += (performance.now() - t0 - stats.ms) * 0.1;
   }
@@ -1246,15 +1347,17 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   }
   // ---- sleep ----
   const tgtF = new Float64Array(n * 3), tvF = new Float64Array(n * 3), offSlept = new Float64Array(n * 3), rotSlept = new Float64Array(cols.length * 9);
-  const offLen = new Float64Array(cols.length), invTmp = new Float64Array(12);
-  let asleep = false, quietT = 0, watched = 0, sleepCalm = 0;
+  const offLen = new Float64Array(cols.length), invTmp = new Float64Array(12), offPiece = new Int16Array(n);
+  let pushedSum = 0;   // asleep: how far the skirt has pushed the knit since it fell asleep (the furthest point, added up)
+  let asleep = false, quietT = 0, watched = 0, sleepCalm = 0, fitW = 0;   // fitW: how much of restToFit applies awake (0 to 1)
   // this frame: is everything that moves the knit quiet, and has a piece of the body turned away from where it fell asleep?
   function watch(dt, skirt) {
     const idt = 1 / dt;
-    let accMax = 0;
+    let accMax = 0, carry = 0;
     for (let k = 0; k < n * 3; k += 3) {
       const vx = (tgt[k] - tgtF[k]) * idt, vy = (tgt[k + 1] - tgtF[k + 1]) * idt, vz = (tgt[k + 2] - tgtF[k + 2]) * idt;
       if (watched >= 2) accMax = Math.max(accMax, Math.hypot(vx - tvF[k], vy - tvF[k + 1], vz - tvF[k + 2]) * idt);
+      if (watched >= 1) carry = Math.max(carry, Math.hypot(vx - windK[0], vy - windK[1], vz - windK[2]));
       if (watched >= 1) { tvF[k] = vx; tvF[k + 1] = vy; tvF[k + 2] = vz; }
       tgtF[k] = tgt[k]; tgtF[k + 1] = tgt[k + 1]; tgtF[k + 2] = tgt[k + 2];
     }
@@ -1270,8 +1373,9 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       if (d > out) { out = d; outPiece = q; }
     }
     const skirtAwake = !!(skirt && skirt.cloth.o.sleep && !skirt.cloth.sleeping);
-    stats.watch = { accel: accMax, out, piece: outPiece >= 0 ? cols[outPiece].name : null, skirtAwake };   // for tuning: what keeps the knit awake
-    return { quiet: !grab && boostOn <= 0 && calm <= 0 && (asleep || !skirtAwake) && accMax < o.quietAccel, moved: out > o.wakeDist };
+    const calmAir = !windK[0] && !windK[1] && !windK[2];
+    stats.watch = { accel: accMax, out, air: carry, piece: outPiece >= 0 ? cols[outPiece].name : null, skirtAwake };   // for tuning: what keeps the knit awake
+    return { quiet: !grab && boostOn <= 0 && calm <= 0 && (asleep || !skirtAwake) && calmAir && carry < o.quietAir && accMax < o.quietAccel, moved: out > o.wakeDist };
   }
   function fallAsleep() {
     asleep = true;
@@ -1287,21 +1391,21 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
         const m = invs[q], d = cols[q].sdf.sample(m[0] * px + m[1] * py + m[2] * pz + m[3], m[4] * px + m[5] * py + m[6] * pz + m[7], m[8] * px + m[9] * py + m[10] * pz + m[11]);
         if (d < best) { best = d; bq = q; }
       }
-      offLen[bq] = Math.max(offLen[bq], Math.hypot(offSlept[k], offSlept[k + 1], offSlept[k + 2]));
+      offLen[bq] = Math.max(offLen[bq], Math.hypot(offSlept[k], offSlept[k + 1], offSlept[k + 2])); offPiece[i] = bq;
     }
+    pushedSum = 0;
   }
-  // asleep: every point at its target plus the offset it fell asleep with (dying out: restToFit), at its target's speed,
+  // asleep: every point at its target plus the offset it fell asleep with (kept: see restToFit), at its target's speed,
   // and outside the skirt under it as awake (the skirt waking does not wake the knit, so it may move up under the hem:
   // Codex's review, 2026-11-15, found the knit left 1 cm inside a skirt surface moved out under it). A push is kept in
   // the offset, so the next frame searches the skirt from where the point was pushed to (kept only for the frame, the
   // knit fell back inside once the skirt had spread more than the 3 cm the search looks: the second review); and a push
-  // further than wakeDist in one frame wakes the knit: the skirt is moving it. Returns the furthest push.
+  // further than wakeDist in one frame wakes the knit: the skirt is moving it. So do pushes adding up to wakeDist over the
+  // frames (with the offsets kept asleep, small pushes frame after frame left the knit wherever the skirt had moved it,
+  // and the piece's longest offset, which the turn that wakes it is measured by, went on as it fell asleep: Codex's
+  // review, 2026-11-16). Returns the furthest push of this frame or all of them so far, whichever is more.
   function stepAsleep(dt) {
-    const keep = o.restToFit > 0 ? Math.exp(-o.restToFit * dt) : 1;
-    for (let k = 0; k < n * 3; k++) {
-      if (keep < 1) { offSlept[k] *= keep; if (Math.abs(offSlept[k]) < 1e-5) offSlept[k] = 0; }
-      x[k] = tgt[k] + offSlept[k]; v[k] = tvF[k];
-    }
+    for (let k = 0; k < n * 3; k++) { x[k] = tgt[k] + offSlept[k]; v[k] = tvF[k]; }
     let pushed = 0;
     if (SK.on) for (let i = 0; i < n; i++) {
       if (!w[i] || x[i * 3 + 1] >= SK.top + 0.02) { skNear[i] = -1; continue; }
@@ -1310,17 +1414,18 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       const k = i * 3, bx = x[k], by = x[k + 1], bz = x[k + 2];
       overSkirt(k, skNear[i]);
       const d = Math.hypot(x[k] - bx, x[k + 1] - by, x[k + 2] - bz);
-      if (d > 0) { pushed = Math.max(pushed, d); offSlept[k] = x[k] - tgt[k]; offSlept[k + 1] = x[k + 1] - tgt[k + 1]; offSlept[k + 2] = x[k + 2] - tgt[k + 2]; }
+      if (d > 0) { pushed = Math.max(pushed, d); offSlept[k] = x[k] - tgt[k]; offSlept[k + 1] = x[k + 1] - tgt[k + 1]; offSlept[k + 2] = x[k + 2] - tgt[k + 2]; offLen[offPiece[i]] = Math.max(offLen[offPiece[i]], Math.hypot(offSlept[k], offSlept[k + 1], offSlept[k + 2])); }
     }
+    pushedSum += pushed;
     xp.set(x); tgtPrev.set(tgt); tvPrev.set(tvF);
     for (const col of cols) col.prev.set(col.M);
     acc = 0;
-    return pushed;
+    return Math.max(pushed, pushedSum);
   }
   // the knit where the bones put it (cloth off, or after a cut to another pose)
   function settle() {
-    asleep = false; quietT = 0; watched = 0; sleepCalm = 0;
-    readRig(); endGrab(); boostOn = 0; boostT = 1; calm = 0;
+    asleep = false; quietT = 0; watched = 0; sleepCalm = 0; fitW = 0;
+    readRig(); endGrab(); boostOn = 0; boostT = 1; calm = 0; planeLast.set(plane); planeStep.set(plane);
     x.set(tgt); xp.set(tgt); tgtPrev.set(tgt); v.fill(0); tvPrev.fill(0); acc = 0;
     if (!lat0Set) {   // how far along the skin each fitted vertex is from its plane's own body vertex, as fitted
       lat0Set = true;
@@ -1330,12 +1435,20 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     fine(); normals(); write();
   }
   const STEP = 1 / 60; let acc = 0;
-  function update(dt, skirt = null, fresh = null) {
+  // wind: { x, y, z } m/s in the world (or null)
+  function update(dt, skirt = null, fresh = null, wind = null) {
     const t0 = performance.now();
+    windK[0] = wind?.x ?? 0; windK[1] = wind?.y ?? 0; windK[2] = wind?.z ?? 0;
     readRig(fresh); readSkirt(skirt);
     stats.rig += (performance.now() - t0 - stats.rig) * 0.1;
-    // always in steps of 1/60 s, whatever the frame rate (two at most a frame; none on a frame that comes early): how the
-    // knit moved depended on the frame's length (at 24 frames a second the hem lay still, near 60 it never did)
+    // In steps of about 1/60 s whatever the frame rate (from 0.75 to 1.5 of it alone, from 0.75 to 1.25 of it two to a
+    // frame; two at most a frame; none on a frame that comes early): how the knit moved depended on the frame's length (at 24 frames a second the hem lay still, near 60 it
+    // never did). The steps of a frame together last exactly as long as the time since the last step, so the body moves
+    // as fast in the knit's time as it does: until 2026-11-16 the steps were exactly 1/60 s and the time left over went on
+    // to the next frame, so with frames of uneven length the body seemed to speed up and slow down from frame to frame
+    // (a frame 1.5 steps long moved the targets 1.5 steps' worth in one step), and walking, the front of a T-shirt shook
+    // 2-4 cm a frame. Frames longer than 2.5 steps are cut there (slow motion, as before): then the steps last less than the
+    // time gone, and only the air is reckoned in the world's time (computeAero).
     let calming = false;
     sleepCalm = 0;
     if (o.sleep && dt > 0) {
@@ -1343,15 +1456,55 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       if (asleep && (!quiet || moved)) { asleep = false; quietT = quiet ? o.calmAfter : 0; }
       else if (!asleep) quietT = quiet ? quietT + dt : 0;
       if (!asleep && quietT > o.calmAfter) { calming = true; sleepCalm = o.calmDamping * Math.min(1, (quietT - o.calmAfter) / Math.max(1e-3, o.sleepAfter - o.calmAfter)); }
-    } else asleep = false;
-    if (asleep) { if (stepAsleep(dt) > o.wakeDist) { asleep = false; quietT = o.calmAfter; } }
+      // the body about still: the offsets die out (restToFit; awake only)
+      const air = stats.watch?.air ?? Infinity, goal = air <= o.fitStill ? 1 : air >= o.quietAir ? 0 : (o.quietAir - air) / Math.max(1e-6, o.quietAir - o.fitStill);
+      fitW += (goal - fitW) * (1 - Math.exp(-dt / Math.max(1e-3, o.fitEase)));
+    } else { asleep = false; fitW = 0; }
+    if (asleep) { planeLast.set(plane); planeStep.set(plane); if (stepAsleep(dt) > o.wakeDist) { asleep = false; quietT = o.calmAfter; } }
     else {
-      acc = Math.min(acc + dt, 2 * STEP + 1e-6);
+      acc += dt;
+      const steps = acc < 0.75 * STEP ? 0 : Math.max(1, Math.min(2, Math.round(acc / STEP)));
+      const h_ = steps ? Math.min(acc, 2.5 * STEP) / steps : 0;
       let ran = 0;
-      while (acc >= STEP) { step(STEP); acc -= STEP; stats.steps++; ran++; }
+      // The body's move since the last step, spread evenly over this frame's steps. (Until 2026-11-16 the first step got
+      // all of it and the second none: at 30 frames a second the targets seemed to move twice as fast for a step and then
+      // stop, and walking along, the knit was flung ahead: the front of a T-shirt stood 9 cm further out than standing.)
+      // ...and so are the skin planes: left at the frame's end for both steps, the first step met the skin half a frame
+      // ahead of everything else, and the skin pushed the front of a T-shirt forward every other step (walking at 30 frames
+      // a second, the chest's fabric shook 9 mm a frame; 2 with the skin planes off)
+      if (calming && steps > 0) xF0.set(x);
+      if (steps > 0) { tgtEnd.set(tgt); tgtStart.set(tgtPrev); planeEnd.set(plane); for (let q = 0; q < cols.length; q++) { colEnd[q].set(cols[q].M); colStart[q].set(cols[q].prev); } }
+      while (ran < steps) {
+        ran++;
+        if (steps > 1) {
+          const a_ = Math.min(1, ran / steps);
+          for (let k = 0; k < n * 3; k++) tgt[k] = tgtStart[k] + (tgtEnd[k] - tgtStart[k]) * a_;
+          for (let q = 0; q < cols.length; q++) { const M = cols[q].M, A = colStart[q], B = colEnd[q]; for (let e = 0; e < 12; e++) M[e] = A[e] + (B[e] - A[e]) * a_; }
+          lerpPlanes(plane, planeLast, planeEnd, a_);
+        }
+        step(h_, acc / steps); stats.steps++;
+        if (fitW > 1e-3 && o.restToFit > 0) {   // the offsets from the targets die out (see restToFit; after `rest`, which would hold them)
+          const keep = Math.exp(-o.restToFit * fitW * h_);
+          for (let i = 0; i < n; i++) {
+            if (!w[i]) continue;
+            const k = i * 3; x[k] = tgt[k] + (x[k] - tgt[k]) * keep; x[k + 1] = tgt[k + 1] + (x[k + 1] - tgt[k + 1]) * keep; x[k + 2] = tgt[k + 2] + (x[k + 2] - tgt[k + 2]) * keep;
+            // ...and outside the skirt again: a target under a spread skirt drew the knit back inside it (Codex's review)
+            if (skNear[i] >= 0) overSkirt(k, skNear[i]);
+          }
+        }
+      }
+      if (steps) { acc = 0; planeLast.set(plane); }
       if (calming && ran) {
         let fastest = 0;
-        for (let i = 0; i < n; i++) { if (!w[i]) continue; const k = i * 3; fastest = Math.max(fastest, Math.hypot(v[k] - tvF[k], v[k + 1] - tvF[k + 1], v[k + 2] - tvF[k + 2])); }
+        // the speed against the targets, and the move over the frame against theirs: the drawing back to the fitted shape
+        // and the skirt move a point after its speed is set (by `rest` at the targets' own), and asleep the offsets are
+        // kept as they are, so the knit falls asleep only once that has come to rest too (Codex's review)
+        const idt_ = 1 / Math.max(1e-6, h_ * ran);
+        for (let i = 0; i < n; i++) {
+          if (!w[i]) continue; const k = i * 3;
+          fastest = Math.max(fastest, Math.hypot(v[k] - tvF[k], v[k + 1] - tvF[k + 1], v[k + 2] - tvF[k + 2]),
+            Math.hypot((x[k] - xF0[k]) - (tgt[k] - tgtStart[k]), (x[k + 1] - xF0[k + 1]) - (tgt[k + 1] - tgtStart[k + 1]), (x[k + 2] - xF0[k + 2]) - (tgt[k + 2] - tgtStart[k + 2])) * idt_);
+        }
         if (fastest < o.sleepSpeed || quietT >= o.sleepAfter) fallAsleep();
       }
     }

@@ -253,11 +253,11 @@ export function createVrmGarments(vrm: VrmLike, garments: Record<string, Garment
         // 配列の順（吊る服→上着）で続けて update を呼ぶこと：間に骨を動かすと、上着が古い行列を使う
         update: (() => {
           let seen = -1;
-          return (delta: number) => {
+          return (delta: number, wind?: ClothWind | null) => {
             const fresh = firstHung && firstHung.rigVersion !== seen ? firstHung.mesh.skeleton : null;
             if (firstHung) seen = firstHung.rigVersion;
             under?.refresh();
-            knit.update(delta, under, fresh);
+            knit.update(delta, under, fresh, wind?.velocity ?? null);
           };
         })(),
         setEnabled: knit.setEnabled,
