@@ -53,6 +53,10 @@ import type { GarmentSpec } from '../cloth/vrm';
 // 3D背景の動かない小物の影を描くときだけ使うレイヤー（staticShadowCamera が見る）
 const STATIC_SHADOW_LAYER = 8;
 const POSE_CLIP_MAX_SEC = 0.2;
+/** 同じループを再生する人どうしの再生位置の最小の間隔（周期に対する割合）。これより近いとそろって揺れて見える */
+const LOOP_MIN_GAP = 0.15;
+/** 同じ1回きりのモーションを一斉に始めるときの遅れの最大（秒）。人の反応のばらつき程度にとどめ、そろった動きに見える範囲にする */
+const ONE_SHOT_MAX_LAG_SEC = 0.35;
 /** カットの途中で立ち位置が変わったときに、カメラが追いかける秒数（構図を変えたときは秒数の指定がなければ切り替える） */
 const CAMERA_TRANSITION_SEC = 0.6;
 /** カットの頭からこの秒数までは、キャラの読み込みで立ち位置が決まっても追いかけずに合わせる */
@@ -1490,12 +1494,39 @@ export class StageManager {
     if (pending !== undefined) window.clearTimeout(pending);
     this.motionReturnTimers.delete(id);
 
-    // 同じループを再生している人がいたら、その人数に応じて再生位置をずらす（並んだキャラが同じ周期で揺れないように）
-    const phase = loop && url ? this.motionPhase(id, url) : 0;
+    // 同じループをすでに再生していれば、そのまま続く（再生位置は今のまま）
+    const continuing = loop && !!url && avatar.loopTimeOf(url) !== null;
+    // 同じ1回きりのモーション（一斉のお辞儀など）を同じカットで始める人がいれば、少し遅れて始める
+    const lag = loop ? 0 : this.oneShotLag(id, key);
+    if (lag > offsetSec) {
+      const timer = window.setTimeout(() => {
+        this.motionReturnTimers.delete(id);
+        if (this.avatarMotionUrls.get(id) === key && !this.isDisposed) this.startMotion(id, avatar, url, motion, loop, key, 0, seek, continuing);
+      }, (lag - offsetSec) * 1000);
+      this.motionReturnTimers.set(id, timer);
+      return;
+    }
+    this.startMotion(id, avatar, url, motion, loop, key, offsetSec - lag, seek, continuing);
+  }
+
+  /** 同じ1回きりのモーションを同じカットで先に始める人（立ち位置の並び順）の数に応じた遅れ（秒）。黄金比で割って、何人でも重ならない */
+  private oneShotLag(id: string, key: string): number {
+    const index = this.castIds.indexOf(id);
+    const before = (index < 0 ? this.castIds : this.castIds.slice(0, index)).filter((other) => other !== id && this.avatarMotionUrls.get(other) === key).length;
+    return ((before * 0.618) % 1) * ONE_SHOT_MAX_LAG_SEC;
+  }
+
+  private startMotion(id: string, avatar: StageAvatar, url: string | null, motion: string | undefined, loop: boolean, key: string, offsetSec: number, seek: boolean, continuing: boolean): void {
     avatar.playAnimation(url, loop, this.motionFadeIn(motion)).then((action) => {
-      // 頭出しでは途中から再生する
       const duration = action?.getClip().duration ?? 0;
-      if (action && (offsetSec > 0 || phase > 0)) action.time = loop ? (offsetSec + phase * duration) % duration : Math.min(offsetSec, duration);
+      if (action && loop && url && duration > 0) {
+        // 頭出しは指定の位置から、続けるときは今の位置から、新しく始めるときは頭から。同じループの人と重なればずらす
+        const base = seek || offsetSec > 0 ? offsetSec % duration : continuing ? action.time : 0;
+        action.time = this.spreadLoopTime(id, url, base, duration);
+      } else if (action && offsetSec > 0) {
+        // 頭出しでは途中から再生する
+        action.time = Math.min(offsetSec, duration);
+      }
       if (seek) avatar.resetClothOnNextUpdate();
       if (loop || !action || this.isDisposed) return;
       // 1枚の絵から作った止め絵のポーズ（ほぼ長さのないモーション）は、待機に戻さずそのまま保つ
@@ -1504,7 +1535,12 @@ export class StageManager {
       const timer = window.setTimeout(() => {
         this.motionReturnTimers.delete(id);
         if (this.avatarMotionUrls.get(id) !== key) return;
-        avatar.playAnimation(idleMotionUrl(), true, this.motionFadeIn(undefined));
+        // 一斉にお辞儀したあとなど、そろって待機へ戻るときも周期をずらす
+        const idleUrl = idleMotionUrl();
+        avatar.playAnimation(idleUrl, true, this.motionFadeIn(undefined)).then((idle) => {
+          const idleDuration = idle?.getClip().duration ?? 0;
+          if (idle && idleUrl && idleDuration > 0) idle.time = this.spreadLoopTime(id, idleUrl, 0, idleDuration);
+        });
       }, durationMs);
       this.motionReturnTimers.set(id, timer);
     });
@@ -1515,11 +1551,34 @@ export class StageManager {
     return this.presets.motions?.[motion || assetIdleMotion() || '']?.fadeIn ?? 0.5;
   }
 
-  /** ループの再生位置のずらし（周期に対する割合）。同じモーションを先に再生している人が何人いるかで決める */
-  private motionPhase(id: string, url: string): number {
-    const others = this.castIds.filter((other) => other !== id && this.avatarMotionUrls.get(other)?.startsWith(`${url}|`)).length;
-    // 黄金比で割ると、何人並んでも位相が重ならない
-    return (others * 0.618) % 1;
+  /**
+   * ループの再生位置（秒）。同じループを再生中の人と近ければ、周期の黄金比ぶんずつ進めて離す（並んだキャラが同じ周期で揺れないように）。
+   * 他の人の実際の再生位置と比べるので、頭出しで全員を当て直すときも、待機へそろって戻るときも重ならない
+   */
+  private spreadLoopTime(id: string, url: string, base: number, duration: number): number {
+    const others = this.castIds.flatMap((other) => {
+      const time = other === id ? null : (this.loadedAvatars.get(other)?.loopTimeOf(url) ?? null);
+      return time === null ? [] : [time % duration];
+    });
+    const gapOf = (time: number) =>
+      Math.min(
+        ...others.map((t) => {
+          const d = Math.abs(time - t);
+          return Math.min(d, duration - d);
+        })
+      );
+    let best = base % duration;
+    let bestGap = gapOf(best);
+    // 黄金比で進めると、何人並んでも位相が重ならない
+    for (let k = 1; bestGap < duration * LOOP_MIN_GAP && k <= 8; k++) {
+      const candidate = (base + k * 0.618 * duration) % duration;
+      const gap = gapOf(candidate);
+      if (gap > bestGap) {
+        best = candidate;
+        bestGap = gap;
+      }
+    }
+    return best;
   }
 
   /** 歩きながらの会話などで背景を横に流す（null で止めて場所の遠景に戻す） */

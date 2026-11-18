@@ -480,6 +480,13 @@ export class StageAvatar {
     });
   }
 
+  /** url のモーションをループで再生中なら、その再生位置（秒）。そうでなければ null */
+  public loopTimeOf(url: string): number | null {
+    const action = this.currentAction;
+    if (this.currentAnimationUrl !== url || !action?.isRunning() || action.loop !== THREE.LoopRepeat) return null;
+    return action.time;
+  }
+
   /** url が null なら、モーションを止めて腕を下ろした姿勢にする（待機モーションを使わないとき） */
   public async playAnimation(
     url: string | null,
