@@ -208,7 +208,10 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     // round its thighs like a bell. SkinnedCloth lowers it to 0 then (`legs`): the cloth lies on the body as it falls
     shapeScale: 1,
     tetherSlack: 1.06,
-    margin: 0.004, friction: 0.5,
+    // margin: how far out of the body the points are kept (m). Between points the cloth is a flat triangle that a rounded body
+    // (a bent knee) can cut through: at 4 mm a seated skirt still showed the knee in a 1 cm sliver, at 6 mm none.
+    // Points nearer the body than this as modelled keep that distance instead (col.margin), so a fitted skirt does not swell
+    margin: 0.006, friction: 0.5,
     air: 1,            // linear drag along the normal, 1/s
     drag: 0.72 / fabric.weight,     // quadratic drag, 1/m: 0.5 * 1.2 kg/m3 * Cd 1.2 / the fabric's weight per area
     inflate: 0.48 / fabric.weight,  // caught air, 1/m: 0.5 * 1.2 / weight, times 0.8 for what leaks out

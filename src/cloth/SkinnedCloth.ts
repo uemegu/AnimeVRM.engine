@@ -115,6 +115,8 @@ const _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
 const RAISED_FROM = (45 * Math.PI) / 180, RAISED_TO = (70 * Math.PI) / 180;
 /** 抜く・戻すの時定数（秒）。1 フレームに dt / DRAPE_TIME ずつ寄る */
 const DRAPE_TIME = 0.4;
+/** 体の三角形を当たり判定の部品に入れる重みの割合。これ以上の重みがある部品のすべてに入れる（関節をまたぐ三角形は両側へ） */
+const JOINT_SHARE = 0.25;
 const _up = new THREE.Vector3(0, 1, 0);
 
 /** リグの重み：[骨の番号, 重み] の並び */
@@ -219,9 +221,12 @@ export class SkinnedCloth {
         if (Math.max(P[a * 3 + 1], P[b * 3 + 1], P[c * 3 + 1]) < lo || Math.min(P[a * 3 + 1], P[b * 3 + 1], P[c * 3 + 1]) > hi) continue;
         sum.fill(0);
         for (const vertex of [a, b, c]) for (let k = 0; k < 4; k++) { const q = pieceOf[J.getComponent(vertex, k)]; if (q >= 0) sum[q] += W.getComponent(vertex, k); }
-        let best = -1;
-        for (let q = 0; q < sum.length; q++) if (sum[q] > 0 && (best < 0 || sum[q] > sum[best])) best = q;
-        if (best >= 0) tris[best].push(a, b, c);
+        // 重みが JOINT_SHARE 以上ある部品のすべてに入れる（関節をまたぐ三角形は両側の部品に入る）。
+        // いちばん重い部品だけに入れていたときは、膝を曲げると、描画される膝（太ももとすねの重みが混ざって動く）が
+        // どちらの固い部品からも最大 9mm 外へ出て、座った膝がスカートを突き抜けた。両側に入れると外へ出る量は 0mm
+        let total = 0;
+        for (let q = 0; q < sum.length; q++) total += sum[q];
+        if (total > 0) for (let q = 0; q < sum.length; q++) if (sum[q] >= JOINT_SHARE * total) tris[q].push(a, b, c);
       }
       for (let q = 0; q < pieceBones.length; q++) {
         if (tris[q].length < 90) continue;
