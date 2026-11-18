@@ -1021,12 +1021,6 @@ export class StageManager {
     const enabled = !!glow?.enabled || eyeCare;
     this.characterGlowPass.enabled = enabled;
     this.characterGlowPass.depthCapture.enabled = enabled;
-  /** 透過光は場所に登録した光源を、今の時間帯で出し分ける。カットの effects.transmittedLight は強さの倍率 */
-  private applyTransmittedLight(): void {
-    const lights = this.presets.locations[this.currentLocationId]?.transmittedLight;
-    this.transmittedLightPass.setLights(lights, this.currentTimeOfDay, this.effects.transmittedLight ?? 1);
-  }
-
     this.characterGlowPass.uniforms.uStrength.value = glow?.enabled ? glow.strength : 0;
     this.characterGlowPass.uniforms.uRadius.value = glow?.radius ?? 0.012;
     this.characterGlowPass.uniforms.uThreshold.value = glow?.threshold ?? 0.16;
@@ -1037,6 +1031,12 @@ export class StageManager {
     finish['uCapKnee'].value = cap ? cap - 0.12 : 1;
     finish['uCapTop'].value = cap ?? 1;
     this.lightWrapPass.uniforms['uBodyStrength'].value = look?.lightWrapBody ?? DEFAULT_LIGHT_WRAP_PARAMS.bodyStrength;
+  }
+
+  /** 透過光は場所に登録した光源を、今の時間帯で出し分ける。カットの effects.transmittedLight は強さの倍率 */
+  private applyTransmittedLight(): void {
+    const lights = this.presets.locations[this.currentLocationId]?.transmittedLight;
+    this.transmittedLightPass.setLights(lights, this.currentTimeOfDay, this.effects.transmittedLight ?? 1);
   }
 
   /** 背景ぼかしは場所のカメラ設定にあるときだけ（重いので品質 low では切る） */
@@ -1104,6 +1104,7 @@ export class StageManager {
     this.applyDepthOfField();
     this.applyBloom();
     this.applyCharacterLook();
+    this.applyTransmittedLight();
     const fov = this.locationStage?.camera?.fov ?? DEFAULT_CAMERA_FOV;
     const far = this.locationStage?.camera?.far ?? 100;
     if (this.camera.fov !== fov || this.camera.far !== far) {
@@ -1113,7 +1114,6 @@ export class StageManager {
     }
     this.updateCameraTarget();
   }
-    this.applyTransmittedLight();
 
   /** 立ち位置（座標の指定がなければ、場所の設定か既定のスロット位置） */
   private resolvePosition(member: StageCastMember): [number, number, number] {
@@ -1681,26 +1681,26 @@ export class StageManager {
     this.firedOneShots.clear();
     this.loadedAvatars.forEach((avatar) => avatar.effects?.clearOneShots());
     this.screenEffects?.playTransition(cut?.screenTransition ?? null, false, () => this.locationReady);
+    this.memoryRippleTime = cut?.screenTransition === 'memory' ? 0 : -1;
     this.applyCutState(false);
   }
 
   /** カットの切り替え演出（暗転・瞼）をもう一度見せる（カットを先頭から再生し直したとき） */
   public replayScreenTransition(): void {
     this.screenEffects?.playTransition(this.cut?.screenTransition ?? null);
+    this.memoryRippleTime = this.cut?.screenTransition === 'memory' ? 0 : -1;
   }
 
   /** 文字演出などの言語 */
   public setLanguage(language: 'ja' | 'en'): void {
     this.language = language;
   }
-    this.memoryRippleTime = cut?.screenTransition === 'memory' ? 0 : -1;
 
   public getQuality(): StageQuality {
     return { ...this.quality };
   }
 
   /**
-    this.memoryRippleTime = this.cut?.screenTransition === 'memory' ? 0 : -1;
    * カット内の時刻（ボイスの再生位置、なければカット開始からの秒数）。
    * seek が true なら、その時刻の状態へ飛ぶ（モーションも途中から）
    */
@@ -2501,8 +2501,8 @@ export class StageManager {
     this.groundShadow.material.dispose();
     this.staticShadowLight.shadow.dispose();
     this.staticShadowTarget.dispose();
+    this.waveGlassPass?.dispose();
+    this.transmittedLightPass?.dispose();
     this.renderer.dispose();
   }
 }
-    this.waveGlassPass.dispose();
-    this.transmittedLightPass.dispose();
