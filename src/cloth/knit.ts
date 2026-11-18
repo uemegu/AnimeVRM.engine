@@ -24,6 +24,8 @@ import { describeParts } from './parts';
 import { weld, capRims, buildSDF } from './sdf';
 import { fabricHinges, solveHinges } from './solver';
 import { fabricOf } from './fabric';
+import { ClothPose, MAX_CLOTH_FRAME } from './timing';
+import { FrameInterpolation } from './frames';
 
 const PIECE_BONES = ['hips', 'spine', 'chest', 'upperChest', 'neck', 'head', 'leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm',
   'leftLowerArm', 'rightLowerArm', 'leftUpperLeg', 'rightUpperLeg'];
@@ -407,6 +409,14 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const ST = new Uint32Array(0), LST = new Float64Array(0);   // the seams are in the samples' graph already
   // from here on "points" are the samples
   const n = nc, X0 = X0c, rim = rimC, adj = adjC, adjLen = adjLenC, rep = sampleFine.map((f) => repF[f]);
+  // Anatomical regions are fixed to the avatar; the simulation itself uses world positions.
+  const avatarInverse = vrm.scene.matrixWorld.clone().invert(), localRest = new Float64Array(X0.length);
+  const local = new THREE.Vector3();
+  let minLocalY = Infinity;
+  for (let k = 0; k < X0.length; k += 3) {
+    local.fromArray(X0, k).applyMatrix4(avatarInverse).toArray(localRest, k);
+    minLocalY = Math.min(minLocalY, local.y);
+  }
   // ---- the body, cut into rigid pieces by bone, each a distance grid in its bone's space ----
   const pieceBones = PIECE_BONES.map((nm) => vrm.humanoid?.getRawBoneNode(nm)), pieceNames = PIECE_BONES.filter((_, k) => pieceBones[k]);
   const pb = pieceBones.filter(Boolean);
@@ -442,7 +452,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
         idx.push(i);
       }
       const pad = 0.05, sdf = buildSDF(capRims(weld(pos, idx)), { min: min.map((m) => m - pad), max: max.map((m) => m + pad), cell: o.cell, band: 0.04 });
-      const M = to12(pb[q].matrixWorld, new Float64Array(12)), col = { sdf, bone: pb[q], name: pieceNames[q], M, prev: M.slice(), cur: M.slice(), last: M.slice(), inv: new Float64Array(12), margin: new Float64Array(n) };
+      const M = to12(pb[q].matrixWorld, new Float64Array(12)), col = { sdf, bone: pb[q], name: pieceNames[q], M, prev: M.slice(), cur: M.slice(), last: M.slice(), inv: new Float64Array(12), margin: new Float64Array(n), frameMotion: new FrameInterpolation(), stepMotion: new FrameInterpolation() };
       inv12(M, col.inv);
       cols.push(col);
     }
@@ -476,7 +486,10 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     for (let i = 0; i < n; i++) if (cand[i].some((q) => /hips|spine/.test(cols[q].name))) for (const q of legs) if (!cand[i].includes(q)) cand[i].push(q);
   }
   // ---- the leash: short on skin that faces up at shoulder height and at the cuffs, longer with the distance from there ----
-  const armY = Math.min(...['leftUpperArm', 'rightUpperArm'].map((nm) => vrm.humanoid?.getRawBoneNode(nm)?.getWorldPosition(new THREE.Vector3()).y ?? Infinity));
+  const armY = Math.min(...['leftUpperArm', 'rightUpperArm'].map((name) => {
+    const arm = vrm.humanoid?.getRawBoneNode(name);
+    return arm ? local.setFromMatrixPosition(arm.matrixWorld).applyMatrix4(avatarInverse).y : Infinity;
+  }));
   // What carries the knit is decided in the pose and under the gravity of the moment (supportNow): a point that lies on
   // skin facing up in the fitted mesh, out on the shoulders and arms, is carried until the part of the body under it has
   // turned over (supportOff: the piece's own up against the up of the moment). Upside down, or bent well past the
@@ -489,7 +502,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   // (4 mm), that skin, facing up at the collarbones, carried it too, and bent forward it no longer left the body
   const canCarry = new Uint8Array(n), carried = new Uint8Array(n);   // canCarry: 1 while the skin faces up, 2 always (cuffs)
   for (let i = 0; i < n; i++) {
-    const onTop = sdRest[i] < o.supportNear && upRest[i] > o.supportUp && Math.abs(X0[i * 3]) > o.supportOut && (o.supportBelow < 0 || X0[i * 3 + 1] > (Number.isFinite(armY) ? armY - o.supportBelow : -Infinity));
+    const onTop = sdRest[i] < o.supportNear && upRest[i] > o.supportUp && Math.abs(localRest[i * 3]) > o.supportOut && (o.supportBelow < 0 || localRest[i * 3 + 1] > (Number.isFinite(armY) ? armY - o.supportBelow : -Infinity));
     const cuff = rim[i] && nearPiece[i] >= 0 && /LowerArm/.test(cols[nearPiece[i]].name);
     canCarry[i] = cuff ? 2 : onTop ? 1 : 0;
   }
@@ -511,7 +524,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     supportKey = key; support.length = 0;
     for (let i = 0; i < n; i++) if (carried[i]) support.push(i);
     const fromSupport = geodesic(n, adj, adjLen, support);
-    const hangSup = support.filter((i) => Math.abs(X0[i * 3]) > o.hangOut), fromHang = geodesic(n, adj, adjLen, hangSup.length ? hangSup : support);
+    const hangSup = support.filter((i) => Math.abs(localRest[i * 3]) > o.hangOut), fromHang = geodesic(n, adj, adjLen, hangSup.length ? hangSup : support);
     for (let i = 0; i < n; i++) {
       leashT[i] = Number.isFinite(fromSupport[i]) ? Math.min(o.leashMax, o.leashMin + o.leashSlope * fromSupport[i]) : o.leashMax;
       const hf = fromHang.src[i], hl = Number.isFinite(fromHang[i]) ? fromHang[i] * o.hang : 1e9;
@@ -793,12 +806,13 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   // hem came down 5 cm standing.)
   const easeE = new Float64Array(LS.length);
   for (let q = 0; q < LS.length; q++) {
-    const a = CS[q * 2] * 3, b = CS[q * 2 + 1] * 3, dx = X0[b] - X0[a], dy = X0[b + 1] - X0[a + 1], dz = X0[b + 2] - X0[a + 2], l = Math.hypot(dx, dy, dz) || 1;
-    const onArm = Math.abs((X0[a] + X0[b]) / 2) > o.armFrom, along = ((onArm ? dx : dy) / l) ** 2;   // the rest pose has the arms straight out
+    const a = CS[q * 2] * 3, b = CS[q * 2 + 1] * 3;
+    const dx = localRest[b] - localRest[a], dy = localRest[b + 1] - localRest[a + 1], dz = localRest[b + 2] - localRest[a + 2], l = Math.hypot(dx, dy, dz) || 1;
+    const onArm = Math.abs((localRest[a] + localRest[b]) / 2) > o.armFrom, along = ((onArm ? dx : dy) / l) ** 2;   // the rest pose has the arms straight out
     easeE[q] = o.ease + (o.easeAlong - o.ease) * along;
   }
   {
-    const neck = []; for (let c = 0; c < n; c++) if (rim[c] && Math.abs(X0[c * 3]) < 0.14 && X0[c * 3 + 1] > (Number.isFinite(armY) ? armY - 0.16 : Infinity) && nearPiece[c] >= 0 && !/Arm/.test(cols[nearPiece[c]].name)) neck.push(c);
+    const neck = []; for (let c = 0; c < n; c++) if (rim[c] && Math.abs(localRest[c * 3]) < 0.14 && localRest[c * 3 + 1] > armY - 0.16 && nearPiece[c] >= 0 && !/Arm/.test(cols[nearPiece[c]].name)) neck.push(c);
     if (neck.length) {
       const d = geodesic(n, adj, adjLen, neck, o.neckTaut * 2);
       for (let q = 0; q < LS.length; q++) { const t = Math.min(1, Math.max(0, (o.neckBoth ? Math.max : Math.min)(d[CS[q * 2]], d[CS[q * 2 + 1]]) / o.neckTaut - 1)); easeE[q] = 1 + (easeE[q] - 1) * (Number.isFinite(t) ? t : 1); }
@@ -900,12 +914,12 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const tubeC = [], tubeL = [];
   if (o.tube) {
     const trunk = []; let cx = 0, cz = 0, top = armY - o.tubeBelowArms;
-    for (let i = 0; i < n; i++) if (nearPiece[i] >= 0 && /^(hips|spine|chest|upperChest)$/.test(cols[nearPiece[i]].name) && X0[i * 3 + 1] < top) { trunk.push(i); cx += X0[i * 3]; cz += X0[i * 3 + 2]; }
+    for (let i = 0; i < n; i++) if (nearPiece[i] >= 0 && /^(hips|spine|chest|upperChest)$/.test(cols[nearPiece[i]].name) && localRest[i * 3 + 1] < top) { trunk.push(i); cx += localRest[i * 3]; cz += localRest[i * 3 + 2]; }
     cx /= trunk.length || 1; cz /= trunk.length || 1;
-    for (let y = minY + o.tubeStep * 0.25; y < top; y += o.tubeStep) {
+    for (let y = minLocalY + o.tubeStep * 0.25; y < top; y += o.tubeStep) {
       // the point nearest this height in each of tubeAround sectors
       const ring = new Int32Array(o.tubeAround).fill(-1), err = new Float64Array(o.tubeAround).fill(o.tubeStep * 0.5);
-      for (const i of trunk) { const e = Math.abs(X0[i * 3 + 1] - y), sct = Math.floor((Math.atan2(X0[i * 3 + 2] - cz, X0[i * 3] - cx) / (2 * Math.PI) + 0.5) * o.tubeAround) % o.tubeAround; if (e < err[sct]) { err[sct] = e; ring[sct] = i; } }
+      for (const i of trunk) { const e = Math.abs(localRest[i * 3 + 1] - y), sct = Math.floor((Math.atan2(localRest[i * 3 + 2] - cz, localRest[i * 3] - cx) / (2 * Math.PI) + 0.5) * o.tubeAround) % o.tubeAround; if (e < err[sct]) { err[sct] = e; ring[sct] = i; } }
       for (let a_ = 0; a_ < o.tubeAround; a_++) for (const hop of [o.tubeAround >> 1, Math.round(o.tubeAround / 3)]) {
         const i = ring[a_], j = ring[(a_ + hop) % o.tubeAround]; if (i < 0 || j < 0 || i === j || (hop === o.tubeAround >> 1 && a_ >= hop)) continue;
         tubeC.push(i, j); tubeL.push(Math.hypot(X0[i * 3] - X0[j * 3], X0[i * 3 + 1] - X0[j * 3 + 1], X0[i * 3 + 2] - X0[j * 3 + 2]) * o.tubeKeep);
@@ -923,9 +937,12 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const hipsCol = cols.find((c) => c.name === 'hips');
   if (o.tubeSide && chestCol && axisCols.length >= 3) {
     let cx = 0, cz = 0, cnt = 0; const top = armY - o.tubeBelowArms, M = chestCol.M;
-    for (let i = 0; i < n; i++) if (nearPiece[i] >= 0 && /^(hips|spine|chest|upperChest)$/.test(cols[nearPiece[i]].name) && X0[i * 3 + 1] < top) { around.ids.push(i); cx += X0[i * 3]; cz += X0[i * 3 + 2]; cnt++; }
+    for (let i = 0; i < n; i++) if (nearPiece[i] >= 0 && /^(hips|spine|chest|upperChest)$/.test(cols[nearPiece[i]].name) && localRest[i * 3 + 1] < top) { around.ids.push(i); cx += localRest[i * 3]; cz += localRest[i * 3 + 2]; cnt++; }
     cx /= cnt || 1; cz /= cnt || 1;
-    for (const i of around.ids) { const sx = X0[i * 3] - cx, sz = X0[i * 3 + 2] - cz, l = Math.hypot(sx, sz) || 1; around.side.push(M[0] * sx / l + M[8] * sz / l, M[1] * sx / l + M[9] * sz / l, M[2] * sx / l + M[10] * sz / l); }   // in the chest's frame
+    for (const i of around.ids) {
+      const { x: dx, y: dy, z: dz } = local.set(localRest[i * 3] - cx, 0, localRest[i * 3 + 2] - cz).transformDirection(vrm.scene.matrixWorld);
+      around.side.push(M[0] * dx + M[4] * dy + M[8] * dz, M[1] * dx + M[5] * dy + M[9] * dz, M[2] * dx + M[6] * dy + M[10] * dz);
+    }   // in the chest's frame
     around.ang = new Float64Array(around.ids.length * 8);
   }
   const isTrunk = new Uint8Array(n); for (const i of around.ids) isTrunk[i] = 1;
@@ -1002,13 +1019,9 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const stats = { steps: 0, ms: 0, rig: 0, out: 0, t: [0, 0, 0, 0] };   // t: predict+grab, edges, body+skirt+leash, the rest (ms a frame, eased)
   // ---- the air (once a step): see `drag` ----
   const aero = new Float64Array(n * 3), aeroW = new Float64Array(n), windK = [0, 0, 0];
-  // dt: this step's length; span: how much of the world's time it stands for (more than dt on a frame cut at 2.5 steps).
-  // The air is the world's: the body's speed is its targets' move over span, and the knit's own speed is taken at the same
-  // rate (with the body's speed over dt, a cut frame of 100 ms walking at 1.3 m/s took the body for 3.1 m/s, and the lee
-  // pushed a top's back forward)
-  function computeAero(dt, span = dt) {
+  function computeAero(dt) {
     aero.fill(0); aeroW.fill(0);
-    const idt = 1 / span, rv = dt / span;
+    const idt = 1 / dt;
     // The body's own line (hips to chest, and on down past the hips): a face's outside is its side away from that line.
     // (Away from the world's vertical through the hips until 2026-11-16: bent forward, the back ahead of the hips, the back's
     // faces were taken as facing in, and the air on them as the lee's.)
@@ -1029,7 +1042,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       const ox = (x[a] + x[b] + x[c]) / 3 - lx0, oy = (x[a + 1] + x[b + 1] + x[c + 1]) / 3 - ly0, oz = (x[a + 2] + x[b + 2] + x[c + 2]) / 3 - lz0, od = ox * ldx + oy * ldy + oz * ldz;
       const out = nx * (ox - ldx * od) + ny * (oy - ldy * od) + nz * (oz - ldz * od) >= 0 ? 1 : -1;
       const k = (nx * ux_ + ny * uy_ + nz * uz_) * out > 0 ? o.shield : 1;   // the air leaves through this face: the lee
-      const rx = (v[a] + v[b] + v[c]) / 3 * rv - (bx + ux_ * k), ry = (v[a + 1] + v[b + 1] + v[c + 1]) / 3 * rv - (by + uy_ * k), rz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3 * rv - (bz + uz_ * k);
+      const rx = (v[a] + v[b] + v[c]) / 3 - (bx + ux_ * k), ry = (v[a + 1] + v[b + 1] + v[c + 1]) / 3 - (by + uy_ * k), rz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3 - (bz + uz_ * k);
       const vn = rx * nx + ry * ny + rz * nz, m = -dragK * Math.abs(vn) * vn * A2;
       for (const q of [a, b, c]) { aero[q] += nx * m; aero[q + 1] += ny * m; aero[q + 2] += nz * m; }
       aeroW[i] += A2; aeroW[j] += A2; aeroW[l] += A2;
@@ -1043,7 +1056,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       aero[k] = ax; aero[k + 1] = ay; aero[k + 2] = az;
     }
   }
-  function step(dt, span = dt) {
+  function step(dt) {
     const t0 = performance.now(), ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), damp = Math.max(0, 1 - (o.damping + sleepCalm) * h), ih = 1 / h;
     if (grab) { boostT = 0; boostOn = 1; calm = 1; }
     else {
@@ -1084,12 +1097,13 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     if (o.inertia < 1) for (let k = 0; k < n * 3; k++) { const tv = (tgt[k] - tgtPrev[k]) * idtF; if (w[k / 3 | 0]) v[k] += (1 - o.inertia) * (tv - tvPrev[k]); tvPrev[k] = tv; }
     const tt = [0, 0, 0, 0]; let tm = performance.now(); const lap = (q) => { const now = performance.now(); tt[q] += now - tm; tm = now; };
     for (let i = 0; i < n; i++) skNear[i] = SK.on && x[i * 3 + 1] < SK.top + 0.02 ? findSkirt(i) : -1;
-    computeAero(dt, span);
+    computeAero(dt);
+    for (const col of cols) col.stepMotion.set(col.prev, col.M);
     for (let s = 0; s < ns; s++) {
       const a = (s + 1) / ns;
       // the skin planes too, from where the last step left them (as the pieces and the targets are)
       lerpPlanes(planeS, planeStep, plane, a);
-      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); for (let q = 0; q < 12; q++) col.cur[q] = col.prev[q] + (col.M[q] - col.prev[q]) * a; inv12(col.cur, col.inv); ball(col); }
+      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); col.stepMotion.at(a, col.cur); inv12(col.cur, col.inv); ball(col); }
       for (let i = 0; i < n; i++) {
         const k = i * 3;
         xp[k] = x[k]; xp[k + 1] = x[k + 1]; xp[k + 2] = x[k + 2];
@@ -1302,6 +1316,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   }
   const oldGeometry = mesh.geometry;
   mesh.geometry = geo; mesh.frustumCulled = false;
+  let enabled = true;
+  const clothPose = new ClothPose(), reference = hipsBone ?? vrm.scene;
   const hipsSkin = new THREE.Matrix4(), hipsSkinInv = new THREE.Matrix4();
   function write() {
     hipsSkin.fromArray(skeleton.boneMatrices, hipsIndex * 16).multiply(mesh.bindMatrix); hipsSkinInv.copy(hipsSkin).invert();
@@ -1424,9 +1440,18 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   }
   // the knit where the bones put it (cloth off, or after a cut to another pose)
   function settle() {
+    if (!enabled) return;
+    readRig();
+    clothPose.advance(reference.matrixWorld);
+    resetToPose();
+  }
+
+  function resetToPose() {
     asleep = false; quietT = 0; watched = 0; sleepCalm = 0; fitW = 0;
-    readRig(); endGrab(); boostOn = 0; boostT = 1; calm = 0; planeLast.set(plane); planeStep.set(plane);
+    endGrab(); boostOn = 0; boostT = 1; calm = 0; planeLast.set(plane); planeStep.set(plane);
     x.set(tgt); xp.set(tgt); tgtPrev.set(tgt); v.fill(0); tvPrev.fill(0); acc = 0;
+    skNear.fill(-1); hangSlack.fill(0); supportNow(true);
+    rise = o.riseKeep; around.turn = 0; for (const sleeve of sleeves) sleeve.turn = 0;
     if (!lat0Set) {   // how far along the skin each fitted vertex is from its plane's own body vertex, as fitted
       lat0Set = true;
       for (let t = 0; t < skinPts.length; t++) { const k = skinPts[t] * 3, q = t * 6, ex = tf[k] - plane[q], ey = tf[k + 1] - plane[q + 1], ez = tf[k + 2] - plane[q + 2], d = ex * plane[q + 3] + ey * plane[q + 4] + ez * plane[q + 5]; lat0[t] = Math.sqrt(Math.max(0, ex * ex + ey * ey + ez * ez - d * d)); }
@@ -1437,18 +1462,19 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const STEP = 1 / 60; let acc = 0;
   // wind: { x, y, z } m/s in the world (or null)
   function update(dt, skirt = null, fresh = null, wind = null) {
+    if (!enabled || !(dt > 0)) return;
+    for (let object = mesh; object; object = object.parent) {
+      if (!object.visible) { clothPose.invalidate(); return; }
+    }
     const t0 = performance.now();
     windK[0] = wind?.x ?? 0; windK[1] = wind?.y ?? 0; windK[2] = wind?.z ?? 0;
-    readRig(fresh); readSkirt(skirt);
+    readRig(fresh);
+    const jumped = clothPose.advance(reference.matrixWorld);
+    if (jumped || acc + dt > MAX_CLOTH_FRAME) { resetToPose(); return; }
+    readSkirt(skirt);
     stats.rig += (performance.now() - t0 - stats.rig) * 0.1;
-    // In steps of about 1/60 s whatever the frame rate (from 0.75 to 1.5 of it alone, from 0.75 to 1.25 of it two to a
-    // frame; two at most a frame; none on a frame that comes early): how the knit moved depended on the frame's length (at 24 frames a second the hem lay still, near 60 it
-    // never did). The steps of a frame together last exactly as long as the time since the last step, so the body moves
-    // as fast in the knit's time as it does: until 2026-11-16 the steps were exactly 1/60 s and the time left over went on
-    // to the next frame, so with frames of uneven length the body seemed to speed up and slow down from frame to frame
-    // (a frame 1.5 steps long moved the targets 1.5 steps' worth in one step), and walking, the front of a T-shirt shook
-    // 2-4 cm a frame. Frames longer than 2.5 steps are cut there (slow motion, as before): then the steps last less than the
-    // time gone, and only the air is reckoned in the world's time (computeAero).
+    // Use up to two steps per frame. Together they cover the time since the last step, including early frames
+    // that only refreshed the rig, so a pose and its velocity always advance over the same interval.
     let calming = false;
     sleepCalm = 0;
     if (o.sleep && dt > 0) {
@@ -1464,7 +1490,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     else {
       acc += dt;
       const steps = acc < 0.75 * STEP ? 0 : Math.max(1, Math.min(2, Math.round(acc / STEP)));
-      const h_ = steps ? Math.min(acc, 2.5 * STEP) / steps : 0;
+      const h_ = steps ? acc / steps : 0;
       let ran = 0;
       // The body's move since the last step, spread evenly over this frame's steps. (Until 2026-11-16 the first step got
       // all of it and the second none: at 30 frames a second the targets seemed to move twice as fast for a step and then
@@ -1473,16 +1499,23 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       // ahead of everything else, and the skin pushed the front of a T-shirt forward every other step (walking at 30 frames
       // a second, the chest's fabric shook 9 mm a frame; 2 with the skin planes off)
       if (calming && steps > 0) xF0.set(x);
-      if (steps > 0) { tgtEnd.set(tgt); tgtStart.set(tgtPrev); planeEnd.set(plane); for (let q = 0; q < cols.length; q++) { colEnd[q].set(cols[q].M); colStart[q].set(cols[q].prev); } }
+      if (steps > 0) {
+        tgtEnd.set(tgt); tgtStart.set(tgtPrev); planeEnd.set(plane);
+        if (steps > 1) for (let q = 0; q < cols.length; q++) {
+          const col = cols[q];
+          colStart[q].set(col.prev); colEnd[q].set(col.M);
+          col.frameMotion.set(colStart[q], colEnd[q]);
+        }
+      }
       while (ran < steps) {
         ran++;
         if (steps > 1) {
           const a_ = Math.min(1, ran / steps);
           for (let k = 0; k < n * 3; k++) tgt[k] = tgtStart[k] + (tgtEnd[k] - tgtStart[k]) * a_;
-          for (let q = 0; q < cols.length; q++) { const M = cols[q].M, A = colStart[q], B = colEnd[q]; for (let e = 0; e < 12; e++) M[e] = A[e] + (B[e] - A[e]) * a_; }
+          for (const col of cols) col.frameMotion.at(a_, col.M);
           lerpPlanes(plane, planeLast, planeEnd, a_);
         }
-        step(h_, acc / steps); stats.steps++;
+        step(h_); stats.steps++;
         if (fitW > 1e-3 && o.restToFit > 0) {   // the offsets from the targets die out (see restToFit; after `rest`, which would hold them)
           const keep = Math.exp(-o.restToFit * fitW * h_);
           for (let i = 0; i < n; i++) {
@@ -1546,11 +1579,16 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     return { strain, meanStrain: sum / LS.length, off: off / n, offMax, speed, steps: stats.steps, ms: stats.ms + stats.rig + stats.out, stepMs: stats.ms, rigMs: stats.rig, outMs: stats.out, parts: stats.t.map((v) => +v.toFixed(1)) };
   }
   function dispose() { mesh.geometry = oldGeometry; geo.dispose(); }
-  function setEnabled(on) { mesh.geometry = on ? geo : oldGeometry; if (on) settle(); }
+  function setEnabled(on) {
+    if (on === enabled) return;
+    enabled = on;
+    mesh.geometry = on ? geo : oldGeometry;
+    if (on) settle();
+  }
 
   settle();
   return {
-    get sleeping() { return asleep; }, stats,
+    get enabled() { return enabled; }, get sleeping() { return asleep; }, stats,
     mesh, update, settle, setEnabled, raycast, skinGapNow, startGrab, moveGrab, endGrab, measure, gap, dispose, o,
     n: nf, x: xf, X0: Xf0, tgt: tf, rim: openRim, support: support.map((c) => sampleFine[c]), F: Ff,
     leash: Float64Array.from({ length: nf }, (_, i) => leash[sIdx[patch[i]]]),

@@ -312,6 +312,8 @@ export class StageAvatar {
   private clothSleep: boolean;
   /** 布を作ったか（createCloths は 1 回だけ） */
   private clothsCreated = false;
+  private clothResetPending = false;
+  private restoreClothRestPose: (() => void) | null = null;
   private readonly garments: Record<string, GarmentSpec>;
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
@@ -438,6 +440,7 @@ export class StageAvatar {
           // 1.5 スカートの布。形を測る処理（へこみ・濡れ）の後、モーションを当てる前の姿勢で作る。
           // スカートのジオメトリを差し替えるので、スムース法線の後
           if (this.skirtClothEnabled) this.createCloths(vrm);
+          else if (Object.keys(this.garments).length > 0) this.restoreClothRestPose = this.captureClothPose(vrm);
 
           // 2. メッシュのシャドウとカリング解除
           vrm.scene.traverse((obj) => {
@@ -627,6 +630,20 @@ export class StageAvatar {
     this.setClothSleep(this.clothSleep);
   }
 
+  private captureClothPose(vrm: VRM): () => void {
+    const restore: Array<() => void> = [];
+    vrm.scene.traverse((object) => {
+      if (object !== vrm.scene && !(object as THREE.Bone).isBone) return;
+      const position = object.position.clone(), rotation = object.quaternion.clone(), scale = object.scale.clone();
+      restore.push(() => {
+        object.position.copy(position);
+        object.quaternion.copy(rotation);
+        object.scale.copy(scale);
+      });
+    });
+    return () => { for (const apply of restore) apply(); };
+  }
+
   /** 布が止まったら眠らせて計算を休むか（スカートと上着の両方） */
   public setClothSleep(enabled: boolean): void {
     this.clothSleep = enabled;
@@ -641,12 +658,32 @@ export class StageAvatar {
   /** スカートを布として動かすかを切り替える。切ると揺れものの骨で動くスカートに戻る */
   public setSkirtCloth(enabled: boolean): void {
     this.skirtClothEnabled = enabled;
+    if (!enabled) this.clothResetPending = false;
     if (enabled && !this.clothsCreated && this.vrm) {
-      // 布は読み込み時の姿勢（T ポーズ）の形を覚える。途中から入れるときは、今の姿勢の形が元になる
-      this.createCloths(this.vrm);
+      const vrm = this.vrm;
+      if (this.restoreClothRestPose) {
+        // 途中で有効にしても、長さ・肩の支点は読み込み時の姿勢から取る。
+        const restoreLivePose = this.captureClothPose(vrm);
+        this.restoreClothRestPose();
+        try {
+          this.createCloths(vrm);
+        } finally {
+          this.restoreClothRestPose = null;
+          restoreLivePose();
+          vrm.scene.updateMatrixWorld(true);
+        }
+        this.resetClothOnNextUpdate();
+      } else {
+        this.createCloths(vrm);
+      }
     }
     this.skirtCloth?.setEnabled(enabled);
     for (const cloth of this.otherCloths) cloth.setEnabled(enabled);
+  }
+
+  /** 新しいポーズが反映されたフレームで布を置き直す（頭出し・再登場など） */
+  public resetClothOnNextUpdate(): void {
+    this.clothResetPending = this.skirtClothEnabled;
   }
 
   public setMotionSpeed(speed: number): void {
@@ -924,9 +961,17 @@ export class StageAvatar {
     );
 
     // 4.4 スカートの布（姿勢が決まってから。濡れた服は重いので風に揺らさない）
-    const clothWind = this.wetnessTarget > 0 ? null : this.clothWind();
-    this.skirtCloth?.update(delta, clothWind);
-    for (const cloth of this.otherCloths) cloth.update(delta, clothWind);
+    if (this.skirtClothEnabled) {
+      if (this.clothResetPending) {
+        this.clothResetPending = false;
+        this.skirtCloth?.settle();
+        for (const cloth of this.otherCloths) cloth.settle();
+      } else {
+        const clothWind = this.wetnessTarget > 0 ? null : this.clothWind();
+        this.skirtCloth?.update(delta, clothWind);
+        for (const cloth of this.otherCloths) cloth.update(delta, clothWind);
+      }
+    }
 
     // 4.5 手に押されてスカートがへこむ（腕と揺れものが決まってから）
     this.clothDent?.update();
@@ -1041,6 +1086,7 @@ export class StageAvatar {
     this.skirtCloth = null;
     for (const cloth of this.otherCloths) cloth.dispose();
     this.otherCloths = [];
+    this.restoreClothRestPose = null;
     this.footContactShadow?.dispose();
     this.footContactShadow = null;
     if (this.vrm) {

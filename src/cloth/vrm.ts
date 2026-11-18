@@ -130,6 +130,7 @@ export interface GarmentCloth {
   mesh: THREE.SkinnedMesh;
   info: { mesh?: string; [key: string]: unknown };
   update(delta: number, wind?: ClothWind | null): void;
+  settle(): void;
   setEnabled(enabled: boolean): void;
   dispose(): void;
 }
@@ -254,12 +255,14 @@ export function createVrmGarments(vrm: VrmLike, garments: Record<string, Garment
         update: (() => {
           let seen = -1;
           return (delta: number, wind?: ClothWind | null) => {
+            if (!knit.enabled) return;
             const fresh = firstHung && firstHung.rigVersion !== seen ? firstHung.mesh.skeleton : null;
             if (firstHung) seen = firstHung.rigVersion;
             under?.refresh();
             knit.update(delta, under, fresh, wind?.velocity ?? null);
           };
         })(),
+        settle: knit.settle,
         setEnabled: knit.setEnabled,
         dispose: knit.dispose,
         knit,

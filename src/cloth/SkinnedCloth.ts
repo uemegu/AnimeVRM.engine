@@ -3,6 +3,7 @@ import { describePart } from './parts';
 import { weld, capRims, buildSDF, type DistanceGrid } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
 import type { FabricSpec } from './fabric';
+import { ClothPose, MAX_CLOTH_FRAME } from './timing';
 
 /**
  * 骨で動くメッシュ（SkinnedMesh）の一部を布にする。VRM に限らない。
@@ -103,10 +104,6 @@ export interface ClothWind {
   gust?: number;
 }
 
-/** 1フレームでこれ以上（m）基準の骨が動いたら、姿勢が飛んだ（カット・立ち位置の変更）とみなして布を置き直す */
-const JUMP_DISTANCE = 0.4;
-/** 同じく、基準の骨の向きがこれ以上（ラジアン）変わったら置き直す */
-const JUMP_ANGLE = 1.0;
 /** ソルバーの刻み（秒）。フレームの長さに合わせてサブステップ数を決める */
 const SUBSTEP = 1 / 960;
 /** 1フレームのサブステップ数の上限（60fps のときの数） */
@@ -136,8 +133,7 @@ export class SkinnedCloth {
   private readonly hipsRestInverse = new THREE.Matrix4();
   private readonly hipsSkin = new THREE.Matrix4();
   private readonly hipsSkinInverse = new THREE.Matrix4();
-  private readonly lastRef = new Float64Array(12);
-  private hasLast = false;
+  private readonly clothPose = new ClothPose();
 
   private constructor(
     private readonly root: THREE.Object3D,
@@ -410,22 +406,20 @@ export class SkinnedCloth {
   get sleeping(): boolean { return this.cloth.sleeping; }
 
   settle(): void {
+    if (!this.enabled) return;
     this.readRig();
-    for (let i = 0; i < this.cloth.n; i++) this.pose(i, this.posed, i * 3, this.skin);
-    this.cloth.reset(this.posed);
-    this.lastRef.set(this.cloth.frames.ref.M); this.hasLast = true;
-    this.write();
+    this.clothPose.advance(this.hips.matrixWorld);
+    this.resetToPose();
   }
 
-  /** 基準の骨が1フレームで大きく動いた・向きを変えたか */
-  private jumped(): boolean {
-    if (!this.hasLast) return true;
-    const m = this.cloth.frames.ref.M, l = this.lastRef;
-    // 基準の骨の位置の移動は、枠の並進の差とほぼ同じ
-    if (Math.hypot(m[3] - l[3], m[7] - l[7], m[11] - l[11]) > JUMP_DISTANCE) return true;
-    // 回転の差：trace(Rm · Rlᵀ) = 1 + 2cos(角度)
-    const trace = m[0] * l[0] + m[1] * l[1] + m[2] * l[2] + m[4] * l[4] + m[5] * l[5] + m[6] * l[6] + m[8] * l[8] + m[9] * l[9] + m[10] * l[10];
-    return Math.acos(Math.max(-1, Math.min(1, (trace - 1) / 2))) > JUMP_ANGLE;
+  private resetToPose(): void {
+    for (let i = 0; i < this.cloth.n; i++) this.pose(i, this.posed, i * 3, this.skin);
+    this.cloth.reset(this.posed);
+    if (this.legs) {
+      this.raised = this.drapeWhenRaised ? this.legsRaised() : 0;
+      this.cloth.o.shapeScale = 1 - this.raised;
+    }
+    this.write();
   }
 
   /**
@@ -438,16 +432,15 @@ export class SkinnedCloth {
   public rigVersion = 0;
 
   update(delta: number, wind?: ClothWind | null): void {
-    if (!this.enabled) return;
+    if (!this.enabled || !(delta > 0)) return;
     this.time += delta;
-    if (!this.mesh.visible || delta <= 0) { this.hasLast = false; return; }
-    for (let o: THREE.Object3D | null = this.mesh.parent; o; o = o.parent) if (!o.visible) { this.hasLast = false; return; }
+    for (let o: THREE.Object3D | null = this.mesh; o; o = o.parent) if (!o.visible) { this.clothPose.invalidate(); return; }
     this.readRig();
-    if (delta > 0.25 || this.jumped()) {
-      this.settle();
+    const jumped = this.clothPose.advance(this.hips.matrixWorld);
+    if (jumped || delta > MAX_CLOTH_FRAME) {
+      this.resetToPose();
       return;
     }
-    this.lastRef.set(this.cloth.frames.ref.M);
     const w = this.cloth.wind;
     w[0] = w[1] = w[2] = 0;
     if (wind) {
@@ -460,7 +453,7 @@ export class SkinnedCloth {
         w[0] = _v.x; w[1] = _v.y; w[2] = _v.z;
       }
     }
-    const dt = Math.min(delta, 1 / 30);
+    const dt = delta;
     if (this.legs) {
       const goal = this.drapeWhenRaised ? this.legsRaised() : 0;
       this.raised += (goal - this.raised) * Math.min(1, dt / DRAPE_TIME);

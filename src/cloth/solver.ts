@@ -1,5 +1,6 @@
 import type { DistanceGrid } from './sdf';
 import { fabricOf, type FabricSpec } from './fabric';
+import { FrameInterpolation } from './frames';
 
 /**
  * 布のソルバー（XPBD、CPU）。スカートを点と拘束の集まりとして解く。モデルや描画のことは知らない。
@@ -143,7 +144,6 @@ export function fabricHinges(P: ArrayLike<number>, faces: ArrayLike<number>, ben
 // `free` (optional): per vertex, 1 = cloth, 0 = held to the body (from a rig's weights); without it the top is held
 // 3x4 matrices, row-major: [r00 r01 r02 tx  r10 r11 r12 ty  r20 r21 r22 tz]
 const I12 = () => Float64Array.of(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
-function lerp12(a: Float64Array, b: Float64Array, t: number, out: Float64Array): void { for (let i = 0; i < 12; i++) out[i] = a[i] + (b[i] - a[i]) * t; }
 function inv12(m: Float64Array, out: Float64Array): void {
   const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
   const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g, det = a * A + b * B + c * C, q = 1 / det;
@@ -367,7 +367,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   }
   // ---- how deep each point sits in the body at rest: it is not pushed further out than that ----
   const cols = (colliders ?? (sdf ? [{ sdf }] : [])).map((c) => {
-    const col = { sdf: c.sdf, M: I12(), prev: I12(), cur: I12(), last: I12(), inv: I12(), margin: new Float64Array(n) };
+    const col = { sdf: c.sdf, M: I12(), prev: I12(), cur: I12(), last: I12(), inv: I12(), margin: new Float64Array(n), motion: new FrameInterpolation() };
     if (c.rest) col.M.set(c.rest);
     col.prev.set(col.M); col.cur.set(col.M); col.last.set(col.M); inv12(col.M, col.inv);
     const m = col.inv;
@@ -377,7 +377,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
     return col;
   });
-  const ref = { M: I12(), prev: I12(), cur: I12(), inv: I12() };
+  const ref = { M: I12(), prev: I12(), cur: I12(), inv: I12(), motion: new FrameInterpolation() };
   const pinTarget = new Float64Array(X0), pinPrev = new Float64Array(X0);
   const frames = { ref, colliders: cols, pinTarget };
 
@@ -604,7 +604,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   const candN = new Uint8Array(n), cand = new Uint8Array(n * NC), touching = new Uint8Array(n * NC), aheadM = I12(), aheadInv = cols.map(() => I12());
   function findCands(s: number, ns: number, h: number): void {
     const reach = grab ? Infinity : o.maxSpeed * CAND_EVERY * h + 0.015, a2 = Math.min(1, (s + CAND_EVERY) / ns);
-    for (let q = 0; q < cols.length; q++) { lerp12(cols[q].prev, cols[q].M, a2, aheadM); inv12(aheadM, aheadInv[q]); }
+    for (let q = 0; q < cols.length; q++) { cols[q].motion.at(a2, aheadM); inv12(aheadM, aheadInv[q]); }
     for (let i = 0; i < n; i++) {
       let cn = 0;
       if (w[i]) {
@@ -732,12 +732,14 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       }
     } else if (asleep) wake();
     computeAero(dt);
+    ref.motion.set(ref.prev, ref.M);
+    for (const col of cols) col.motion.set(col.prev, col.M);
     const damp = Math.max(0, 1 - o.damping * h), air = Math.min(0.9, o.air * h), calm = Math.max(0, 1 - calmK * h);
     const gFrom = grab ? grab.prev.slice() : null;
     for (let s = 0; s < ns; s++) {
       const a = (s + 1) / ns;
-      lerp12(ref.prev, ref.M, a, ref.cur); inv12(ref.cur, ref.inv);
-      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); lerp12(col.prev, col.M, a, col.cur); inv12(col.cur, col.inv); }
+      ref.motion.at(a, ref.cur); inv12(ref.cur, ref.inv);
+      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); col.motion.at(a, col.cur); inv12(col.cur, col.inv); }
       if (s % CAND_EVERY === 0) findCands(s, ns, h);
       // predict
       for (let i = 0; i < n; i++) {

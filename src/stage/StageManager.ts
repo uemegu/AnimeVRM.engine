@@ -1187,6 +1187,8 @@ export class StageManager {
       avatar.dispose();
       return avatar;
     }
+    avatar.setSkirtCloth(this.quality.skirtCloth);
+    avatar.setClothSleep(this.quality.clothSleep);
 
     // 現在の時間帯マテリアル設定を初期反映
     const currentPreset = this.presets.timeOfDay[this.currentTimeOfDay] || this.presets.timeOfDay.day;
@@ -1334,6 +1336,7 @@ export class StageManager {
       avatar.vrm.scene.rotation.y = member.rotationY ?? -position[0] * 0.5;
       // 登場したときはその濡れ具合で出す（出ているあいだに変えたら数秒かけて濡れる）
       avatar.setWetness(member.wet ?? 0, !avatar.vrm.scene.visible);
+      if (!avatar.vrm.scene.visible) avatar.resetClothOnNextUpdate();
       avatar.vrm.scene.visible = true;
       avatar.setDaylight(member.daylight ?? 0);
       avatar.setHeldItem(member.heldItem);
@@ -1475,7 +1478,7 @@ export class StageManager {
   }
 
   /** モーション再生。1回きりのモーションは終わったら待機モーションへ戻す（止め絵のポーズは保つ） */
-  private playMotion(id: string, avatar: StageAvatar, motion: string | undefined, loop: boolean, cue = '', offsetSec = 0): void {
+  private playMotion(id: string, avatar: StageAvatar, motion: string | undefined, loop: boolean, cue = '', offsetSec = 0, seek = false): void {
     // モーション名（置き場所は configureAssets の motionUrl）のほか、URL（生成した直後の FBX の blob URL など）も受け付ける
     const url = !motion ? idleMotionUrl() : motionUrl(motion);
     // 指定が変わった時だけ再生する（1回きりの身振りが待機に戻った後、同じ指定で再生し直さない）
@@ -1493,6 +1496,7 @@ export class StageManager {
       // 頭出しでは途中から再生する
       const duration = action?.getClip().duration ?? 0;
       if (action && (offsetSec > 0 || phase > 0)) action.time = loop ? (offsetSec + phase * duration) % duration : Math.min(offsetSec, duration);
+      if (seek) avatar.resetClothOnNextUpdate();
       if (loop || !action || this.isDisposed) return;
       // 1枚の絵から作った止め絵のポーズ（ほぼ長さのないモーション）は、待機に戻さずそのまま保つ
       if (action.getClip().duration <= POSE_CLIP_MAX_SEC) return;
@@ -1751,8 +1755,9 @@ export class StageManager {
         const offset = seek ? Math.max(0, this.cutTime - (effective.motionAt ?? 0)) : 0;
         // 頭出しのときは同じモーションでも再生し直す
         if (seek) this.avatarMotionUrls.delete(member.id);
-        this.playMotion(member.id, avatar, effective.motion, effective.motionLoop, effective.motionCue, offset);
+        this.playMotion(member.id, avatar, effective.motion, effective.motionLoop, effective.motionCue, offset, seek);
       }
+      if (seek || (effective.visible && !avatar.vrm.scene.visible)) avatar.resetClothOnNextUpdate();
       avatar.vrm.scene.visible = effective.visible;
       // 視線の先で構図が変わる（アップの回り込み・肩越しの手前の人）。カットで初めて当てたとき（読み込みが遅れたときなど）は決め直す
       if (!before && this.gaze.get(member.id)?.target !== effective.lookAtTarget) gazeArrived = true;

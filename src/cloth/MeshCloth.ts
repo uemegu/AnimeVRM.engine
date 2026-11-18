@@ -4,6 +4,7 @@ import { weld, capRims, buildSDF } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
 import type { FabricSpec } from './fabric';
 import type { ClothWind } from './SkinnedCloth';
+import { ClothPose, MAX_CLOTH_FRAME } from './timing';
 
 /**
  * 骨のないメッシュ（ふつうの Mesh）を布にする。部品に分かれているだけで骨のないモデル（3D 生成のモデルなど）の
@@ -47,10 +48,6 @@ export interface MeshClothOptions {
   fabric?: FabricSpec;
 }
 
-/** 1フレームでこれ以上（m）follow の物体が動いたら、位置が飛んだとみなして布を置き直す */
-const JUMP_DISTANCE = 0.4;
-/** 同じく、向きがこれ以上（ラジアン）変わったら置き直す */
-const JUMP_ANGLE = 1.0;
 const SUBSTEP = 1 / 960;
 const MAX_SUBSTEPS = 16;
 
@@ -76,8 +73,8 @@ export class MeshCloth {
   private readonly followRestInverse = new THREE.Matrix4();
   private readonly colliderRestInverse: THREE.Matrix4[];
   private readonly meshInverse = new THREE.Matrix4();
-  private readonly lastRef = new Float64Array(12);
-  private hasLast = false;
+  private readonly clothPose = new ClothPose();
+  private readonly followPoint: THREE.Vector3;
 
   private constructor(
     private readonly mesh: THREE.Mesh,
@@ -93,6 +90,7 @@ export class MeshCloth {
     this.info = info;
     this.posed = new Float64Array(cloth.n * 3);
     this.followRestInverse.copy(follow.matrixWorld).invert();
+    this.followPoint = new THREE.Vector3().fromArray(cloth.X0).divideScalar(scale).applyMatrix4(this.followRestInverse);
     this.colliderRestInverse = colliderMeshes.map((m) => new THREE.Matrix4().copy(m.matrixWorld).invert());
     mesh.geometry = geometry;
     mesh.frustumCulled = false;
@@ -257,39 +255,33 @@ export class MeshCloth {
   get sleeping(): boolean { return this.cloth.sleeping; }
 
   settle(): void {
+    if (!this.enabled) return;
     this.readFrames();
+    this.clothPose.advance(this.follow.matrixWorld, this.scale, this.followPoint);
+    this.resetToPose();
+  }
+
+  private resetToPose(): void {
     const m = this.cloth.frames.ref.M, X0 = this.cloth.X0;
     for (let k = 0; k < X0.length; k += 3) {
       const x = X0[k], y = X0[k + 1], z = X0[k + 2];
       this.posed[k] = m[0] * x + m[1] * y + m[2] * z + m[3]; this.posed[k + 1] = m[4] * x + m[5] * y + m[6] * z + m[7]; this.posed[k + 2] = m[8] * x + m[9] * y + m[10] * z + m[11];
     }
     this.cloth.reset(this.posed);
-    this.lastRef.set(m); this.hasLast = true;
     this.write();
-  }
-
-  private jumped(): boolean {
-    if (!this.hasLast) return true;
-    const m = this.cloth.frames.ref.M, l = this.lastRef, p = this.cloth.X0;
-    // 布の上端あたりの1点が、1フレームでどれだけ動いたか
-    const move = (c: number) => (m[c * 4] - l[c * 4]) * p[0] + (m[c * 4 + 1] - l[c * 4 + 1]) * p[1] + (m[c * 4 + 2] - l[c * 4 + 2]) * p[2] + m[c * 4 + 3] - l[c * 4 + 3];
-    if (Math.hypot(move(0), move(1), move(2)) > JUMP_DISTANCE) return true;
-    const trace = m[0] * l[0] + m[1] * l[1] + m[2] * l[2] + m[4] * l[4] + m[5] * l[5] + m[6] * l[6] + m[8] * l[8] + m[9] * l[9] + m[10] * l[10];
-    return Math.acos(Math.max(-1, Math.min(1, (trace - 1) / 2))) > JUMP_ANGLE;
   }
 
   /** 1フレーム進める。モデルを動かした後に呼ぶ。wind は null で無風（速度は m/s） */
   update(delta: number, wind?: ClothWind | null): void {
-    if (!this.enabled) return;
+    if (!this.enabled || !(delta > 0)) return;
     this.time += delta;
-    if (delta <= 0) return;
-    for (let o: THREE.Object3D | null = this.mesh; o; o = o.parent) if (!o.visible) { this.hasLast = false; return; }
+    for (let o: THREE.Object3D | null = this.mesh; o; o = o.parent) if (!o.visible) { this.clothPose.invalidate(); return; }
     this.readFrames();
-    if (delta > 0.25 || this.jumped()) {
-      this.settle();
+    const jumped = this.clothPose.advance(this.follow.matrixWorld, this.scale, this.followPoint);
+    if (jumped || delta > MAX_CLOTH_FRAME) {
+      this.resetToPose();
       return;
     }
-    this.lastRef.set(this.cloth.frames.ref.M);
     const w = this.cloth.wind;
     w[0] = w[1] = w[2] = 0;
     if (wind) {
@@ -301,7 +293,7 @@ export class MeshCloth {
         w[0] = _v.x; w[1] = _v.y; w[2] = _v.z;
       }
     }
-    const dt = Math.min(delta, 1 / 30);
+    const dt = delta;
     this.cloth.o.substeps = Math.max(4, Math.min(MAX_SUBSTEPS, Math.round(dt / SUBSTEP)));
     this.cloth.step(dt);
     this.write();
