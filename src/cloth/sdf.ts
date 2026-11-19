@@ -16,8 +16,8 @@ export interface WeldedMesh {
 export type Vec3Out = { [index: number]: number };
 
 export interface DistanceGrid {
-  /** (x, y, z) の符号付き距離。out を渡すと勾配（単位ベクトル）を書く。格子の外は 1 */
-  sample(x: number, y: number, z: number, out?: Vec3Out): number;
+  /** (x, y, z) の符号付き距離。out を渡すと距離が gradientBelow（既定 Infinity）未満のとき勾配を書く。格子の外は 1 */
+  sample(x: number, y: number, z: number, out?: Vec3Out, gradientBelow?: number): number;
   dims: [number, number, number];
   band: number;
   /** the grid's box in the mesh's own space: [min x, y, z, max x, y, z] (outside it `sample` returns far) */
@@ -101,8 +101,13 @@ export function buildSDF(mesh: WeldedMesh, { min, max, cell = 0.006, band = 0.04
     const j0 = lo(ay, pos[b + 1], pos[c + 1], min[1]), j1 = hi(ay, pos[b + 1], pos[c + 1], min[1], ny);
     const k0 = lo(az, pos[b + 2], pos[c + 2], min[2]), k1 = hi(az, pos[b + 2], pos[c + 2], min[2], nz);
     const d00 = abx * abx + aby * aby + abz * abz, d01 = abx * acx + aby * acy + abz * acz, d11 = acx * acx + acy * acy + acz * acz;
+    const normalSquared = nX * nX + nY * nY + nZ * nZ;
     for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
       const px = min[0] + i * cell - ax, py = min[1] + j * cell - ay, pz = min[2] + k * cell - az;
+      const id = i + nx * (j + ny * k);
+      // The plane is at least as close as the triangle. Keep ties for the original sign test.
+      const height = nX * px + nY * py + nZ * pz;
+      if (height * height > d2[id] * normalSquared * (1 + 1e-10)) continue;
       // closest point on the triangle, as (v, w) along ab and ac (Ericson, Real-Time Collision Detection 5.1.5)
       const e1 = abx * px + aby * py + abz * pz, e2 = acx * px + acy * py + acz * pz;
       let v: number, w: number;
@@ -125,7 +130,7 @@ export function buildSDF(mesh: WeldedMesh, { min, max, cell = 0.006, band = 0.04
         }
       }
       const qx = px - abx * v - acx * w, qy = py - aby * v - acy * w, qz = pz - abz * v - acz * w;
-      const dd = qx * qx + qy * qy + qz * qz, id = i + nx * (j + ny * k);
+      const dd = qx * qx + qy * qy + qz * qz;
       if (dd < d2[id]) { d2[id] = dd; sign[id] = qx * nX + qy * nY + qz * nZ >= 0 ? 1 : -1; }
     }
   }
@@ -146,7 +151,7 @@ export function buildSDF(mesh: WeldedMesh, { min, max, cell = 0.006, band = 0.04
   }
   const inv = 1 / cell, FAR = 1;
   // trilinear sample; `out` (optional) receives the gradient
-  function sample(x: number, y: number, z: number, out?: Vec3Out): number {
+  function sample(x: number, y: number, z: number, out?: Vec3Out, gradientBelow = Infinity): number {
     const fx = (x - min[0]) * inv, fy = (y - min[1]) * inv, fz = (z - min[2]) * inv;
     if (fx < 0 || fy < 0 || fz < 0 || fx >= nx - 1 || fy >= ny - 1 || fz >= nz - 1) return FAR;
     const i = fx | 0, j = fy | 0, k = fz | 0, tx = fx - i, ty = fy - j, tz = fz - k;
@@ -155,13 +160,14 @@ export function buildSDF(mesh: WeldedMesh, { min, max, cell = 0.006, band = 0.04
     const c001 = d[o + sz], c101 = d[o + sz + 1], c011 = d[o + sz + sy], c111 = d[o + sz + sy + 1];
     const x00 = c000 + (c100 - c000) * tx, x10 = c010 + (c110 - c010) * tx, x01 = c001 + (c101 - c001) * tx, x11 = c011 + (c111 - c011) * tx;
     const y0 = x00 + (x10 - x00) * ty, y1 = x01 + (x11 - x01) * ty;
-    if (out) {
+    const distance = y0 + (y1 - y0) * tz;
+    if (out && distance < gradientBelow) {
       const gx = ((c100 - c000) * (1 - ty) + (c110 - c010) * ty) * (1 - tz) + ((c101 - c001) * (1 - ty) + (c111 - c011) * ty) * tz;
       const gy = (x10 - x00) * (1 - tz) + (x11 - x01) * tz, gz = y1 - y0;
       const l = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
       out[0] = gx / l; out[1] = gy / l; out[2] = gz / l;
     }
-    return y0 + (y1 - y0) * tz;
+    return distance;
   }
   return { sample, dims: [nx, ny, nz], band, box: [min[0], min[1], min[2], min[0] + (nx - 1) * cell, min[1] + (ny - 1) * cell, min[2] + (nz - 1) * cell] };
 }

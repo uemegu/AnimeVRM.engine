@@ -682,8 +682,8 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       const cl = cand[sIdx[patch[i]]], k = i * 3;
       for (let q = 0; q < cl.length; q++) {
         const col = cols[cl[q]], m = col.inv;
-        const sd = col.sdf.sample(m[0] * xf[k] + m[1] * xf[k + 1] + m[2] * xf[k + 2] + m[3], m[4] * xf[k] + m[5] * xf[k + 1] + m[6] * xf[k + 2] + m[7], m[8] * xf[k] + m[9] * xf[k + 1] + m[10] * xf[k + 2] + m[11], g);
         const mg = Math.min(0.003, col.marginF[i]);
+        const sd = col.sdf.sample(m[0] * xf[k] + m[1] * xf[k + 1] + m[2] * xf[k + 2] + m[3], m[4] * xf[k] + m[5] * xf[k + 1] + m[6] * xf[k + 2] + m[7], m[8] * xf[k] + m[9] * xf[k + 1] + m[10] * xf[k + 2] + m[11], g, mg);
         if (sd >= mg) continue;
         const c = col.M, gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2], gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = (mg - sd) / gl;
         xf[k] += gx * push; xf[k + 1] += gy * push; xf[k + 2] += gz * push;
@@ -732,24 +732,28 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   function moveGrab(px, py, pz) { if (grab) grab.target = [px, py, pz]; }
   function endGrab() { if (grab) { for (const i of grab.ids) w[i] = 1; grab = null; } }
 
-  // Lc (optional): an edge is pushed back out only when shorter than this, not than L (between the two it is slack)
-  function solve(C, L, alpha, limit, comp = 1, Lc = null) {
-    const give = (o.pullStrain - o.maxStrain) / o.grabBoost * boostOn;
-    for (let q = 0; q < L.length; q++) {
-      const i = C[q * 2], j = C[q * 2 + 1], wi = w[i], wj = w[j], ws = wi + wj;
+  // Limits and denominators depend on the pose and the grab, and stay fixed across
+  // all the stretch passes of this step. Positions still change after every edge.
+  const edgeLimit = new Float64Array(LS.length), edgeDen = new Float64Array(LS.length);
+  function solveStretch(alpha, comp) {
+    for (let q = 0; q < LS.length; q++) {
+      const i = CS[q * 2], j = CS[q * 2 + 1], wi = w[i], wj = w[j], ws = wi + wj;
       if (!ws) continue;
-      const ki = i * 3, kj = j * 3, dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2], l = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (l < 1e-9) continue;
-      // softly toward the rest length; past the limit, all the way back to the limit
-      const lim = limit ? limit + give * Math.max(boost[i], boost[j]) : 0;
-      if (limit && l > lim * L[q]) { heldBy[i] |= 64; heldBy[j] |= 64; }
-      const lam = limit && l > lim * L[q] ? Math.max((l - L[q]) / ((ws + alpha + (lim > limit ? 0.5 : 0)) * l), (l - lim * L[q]) / (ws * l)) : (l - L[q]) / ((ws + alpha + (lim > limit ? 0.5 : 0)) * l);
-      let lm = lam;
-      if (lam < 0) {   // an edge shorter than its length is pushed back only by `comp` of the way: fabric folds
-        const lc = Lc ? Lc[q] : L[q];
-        lm = l < lc ? (l - lc) / ((ws + alpha) * l) * comp : 0;
+      const ki = i * 3, kj = j * 3;
+      const dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2];
+      const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (length < 1e-9) continue;
+      let correction = (length - LSe[q]) / (edgeDen[q] * length);
+      if (length > edgeLimit[q]) {
+        heldBy[i] |= 64; heldBy[j] |= 64;
+        correction = Math.max(correction, (length - edgeLimit[q]) / (ws * length));
       }
-      x[ki] += dx * lm * wi; x[ki + 1] += dy * lm * wi; x[ki + 2] += dz * lm * wi; x[kj] -= dx * lm * wj; x[kj + 1] -= dy * lm * wj; x[kj + 2] -= dz * lm * wj;
+      if (correction < 0) {
+        if (length >= LSc[q]) continue; // slack between the compressed and stretched lengths
+        correction = (length - LSc[q]) / ((ws + alpha) * length) * comp;
+      }
+      x[ki] += dx * correction * wi; x[ki + 1] += dy * correction * wi; x[ki + 2] += dz * correction * wi;
+      x[kj] -= dx * correction * wj; x[kj + 1] -= dy * correction * wj; x[kj + 2] -= dz * correction * wj;
     }
   }
 
@@ -1070,6 +1074,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     // An edge is as long as in the fitted mesh (with ease), or as long as the bones stretch it now if that is more: linear
     // blend skinning stretches the knit 10-20% around a lowered shoulder, and edges held to their rest length there fought
     // the short leashes without end (the samples' edges are solved to the end, unlike the full mesh's were).
+    const give = (o.pullStrain - o.maxStrain) / o.grabBoost * boostOn;
     for (let q = 0; q < LS.length; q++) {
       const i = CS[q * 2] * 3, j = CS[q * 2 + 1] * 3, lt = Math.sqrt((tgt[j] - tgt[i]) ** 2 + (tgt[j + 1] - tgt[i + 1]) ** 2 + (tgt[j + 2] - tgt[i + 2]) ** 2);
       // ...but no more than rigStretch times: a VRoid top's hem hangs on the legs' bones, and with the legs apart its edges
@@ -1080,6 +1085,10 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       // around the body were all 17% short, and awake the whole T-shirt swelled: 7 mm in the first frame awake, front and
       // back, and asleep it went back to the fitted shape. Standing still it swelled and shrank like breathing.)
       LSc[q] = Math.min(lt, LSe[q]);
+      const from = CS[q * 2], to = CS[q * 2 + 1];
+      const limit = o.maxStrain ? o.maxStrain + give * Math.max(boost[from], boost[to]) : 0;
+      edgeLimit[q] = o.maxStrain ? limit * LSe[q] : Infinity;
+      edgeDen[q] = w[from] + w[to] + aS + (limit > o.maxStrain ? 0.5 : 0);
     }
     for (let i = 0; i < n; i++) {
       const sI = hangFrom[i]; if (sI < 0 || sI === i) continue;
@@ -1130,7 +1139,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       // fabric drawn taut over the chest (a VRoid top upside down, its hem's weight on it) went in with the edges and out
       // with the skin every substep and never came to rest while the body moved at all
       for (let ci = 0; ci < o.contactIters; ci++) {
-      for (let it = 0; it < o.stretchIters; it++) solve(CS, LSe, aS, o.maxStrain, compressPass, LSc);
+      for (let it = 0; it < o.stretchIters; it++) solveStretch(aS, compressPass);
       // hang: not further from its support than the way there along the fabric (longer around a pinch while it is held)
       for (let i = 0; i < n; i++) {
         const sI = hangFrom[i];
@@ -1179,7 +1188,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
           const col = cols[cl[q]], m = col.inv, px = x[k], py = x[k + 1], pz = x[k + 2], bw = col.bw;
           if ((px - bw[0]) ** 2 + (py - bw[1]) ** 2 + (pz - bw[2]) ** 2 > col.br2) continue;
           const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
-          const sd = col.sdf.sample(lx, ly, lz, g);
+          const sd = col.sdf.sample(lx, ly, lz, g, col.margin[i]);
           if (sd < o.edgeNear) nearMask[i] |= 1 << cl[q];
           if (sd >= col.margin[i]) continue;
           const c = col.cur;
@@ -1227,8 +1236,9 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
         for (let c_ = 0; c_ < midCols.length; c_++) {
           const col = midCols[c_], bw = col.bw; if (!(maskE >>> col.idx & 1) || (trunkE && col.isLimb) || (riseU && !col.isLimb)) continue;   // upright, the fitted top and the skin planes do it (and these moved a few points 5 mm standing still)
           if ((px - bw[0]) ** 2 + (py - bw[1]) ** 2 + (pz - bw[2]) ** 2 > col.br2) continue;
-          const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11], sd = col.sdf.sample(lx_, ly_, lz_);
-          const mg = col.mE[q]; if (sd >= mg) continue; col.sdf.sample(lx_, ly_, lz_, g);
+          const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11];
+          const mg = col.mE[q], sd = col.sdf.sample(lx_, ly_, lz_, g, mg);
+          if (sd >= mg) continue;
           const c = col.cur; let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = (mg - sd) / gl * 2 / (wi + wj) * (col.isLimb ? 1 : o.edgeSoft);   // the middle moves by the mean of the two ends
           gx *= push; gy *= push; gz *= push;
@@ -1246,8 +1256,9 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
         for (let c_ = 0; c_ < midCols.length; c_++) {
           const col = midCols[c_], bw = col.bw; if (!(maskF >>> col.idx & 1) || (trunkF && col.isLimb) || (riseU && !col.isLimb)) continue;
           if ((px - bw[0]) ** 2 + (py - bw[1]) ** 2 + (pz - bw[2]) ** 2 > col.br2) continue;
-          const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11], sd = col.sdf.sample(lx_, ly_, lz_);
-          const mg = col.mT[f / 3]; if (sd >= mg) continue; col.sdf.sample(lx_, ly_, lz_, g);
+          const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11];
+          const mg = col.mT[f / 3], sd = col.sdf.sample(lx_, ly_, lz_, g, mg);
+          if (sd >= mg) continue;
           const c = col.cur; let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = (mg - sd) / gl * 3 / ws * (col.isLimb ? 1 : o.edgeSoft);
           gx *= push; gy *= push; gz *= push;
@@ -1319,8 +1330,11 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   let enabled = true;
   const clothPose = new ClothPose(), reference = hipsBone ?? vrm.scene;
   const hipsSkin = new THREE.Matrix4(), hipsSkinInv = new THREE.Matrix4();
+  function readHipsSkin() {
+    hipsSkin.fromArray(skeleton.boneMatrices, hipsIndex * 16).multiply(mesh.bindMatrix);
+  }
   function write() {
-    hipsSkin.fromArray(skeleton.boneMatrices, hipsIndex * 16).multiply(mesh.bindMatrix); hipsSkinInv.copy(hipsSkin).invert();
+    hipsSkinInv.copy(hipsSkin).invert();
     const e = hipsSkinInv.elements, P = posAttr.array, N = nrmAttr.array;
     for (let r = 0; r < nR; r++) {
       const k = mapR[r] * 3, wx = xf[k], wy = xf[k + 1], wz = xf[k + 2], nx = nrmF[k] * flip, ny = nrmF[k + 1] * flip, nz = nrmF[k + 2] * flip;
@@ -1446,7 +1460,30 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     resetToPose();
   }
 
+  // Keep the last sleeping frame's inputs to fine(), contact correction and write().
+  // readRig and stepAsleep still run: breathing and a moving underskirt can change the output.
+  const outputInputs = [tf, x, tgtPrev, plane, hipsSkin.elements, ...cols.map(col => col.M)];
+  let savedInputs = null;
+  let savedSkinReach = NaN;
+  function sameSleepingOutput() {
+    if (!asleep) { savedSkinReach = NaN; return false; }
+    if (!savedInputs) savedInputs = outputInputs.map(input => new Float64Array(input.length));
+    let same = savedSkinReach === o.skinReach;
+    for (let q = 0; same && q < outputInputs.length; q++) {
+      const input = outputInputs[q], saved = savedInputs[q];
+      for (let i = 0; i < input.length; i++) {
+        if (input[i] !== saved[i]) { same = false; break; }
+      }
+    }
+    if (!same) {
+      savedSkinReach = o.skinReach;
+      for (let q = 0; q < outputInputs.length; q++) savedInputs[q].set(outputInputs[q]);
+    }
+    return same;
+  }
+
   function resetToPose() {
+    savedSkinReach = NaN;
     asleep = false; quietT = 0; watched = 0; sleepCalm = 0; fitW = 0;
     endGrab(); boostOn = 0; boostT = 1; calm = 0; planeLast.set(plane); planeStep.set(plane);
     x.set(tgt); xp.set(tgt); tgtPrev.set(tgt); v.fill(0); tvPrev.fill(0); acc = 0;
@@ -1457,7 +1494,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       for (let t = 0; t < skinPts.length; t++) { const k = skinPts[t] * 3, q = t * 6, ex = tf[k] - plane[q], ey = tf[k + 1] - plane[q + 1], ez = tf[k + 2] - plane[q + 2], d = ex * plane[q + 3] + ey * plane[q + 4] + ez * plane[q + 5]; lat0[t] = Math.sqrt(Math.max(0, ex * ex + ey * ey + ez * ez - d * d)); }
     }
     for (const col of cols) { col.prev.set(col.M); col.cur.set(col.M); col.last.set(col.M); }
-    fine(); normals(); write();
+    readHipsSkin(); fine(); normals(); write();
   }
   const STEP = 1 / 60; let acc = 0;
   // wind: { x, y, z } m/s in the world (or null)
@@ -1543,8 +1580,11 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     }
     stats.asleep = asleep;
     const t1 = performance.now();
-    for (const col of cols) inv12(col.M, col.inv);
-    fine(); fineSkin(); finePieces(); normals(); write();
+    readHipsSkin();
+    if (!sameSleepingOutput()) {
+      for (const col of cols) inv12(col.M, col.inv);
+      fine(); fineSkin(); finePieces(); normals(); write();
+    }
     stats.out += (performance.now() - t1 - stats.out) * 0.1;
   }
   const ea = new THREE.Vector3(), eb = new THREE.Vector3(), ec = new THREE.Vector3(), hit = new THREE.Vector3();

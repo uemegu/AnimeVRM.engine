@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { describePart } from './parts';
+import { describePart, type ModelPart } from './parts';
 import { weld, capRims, buildSDF, type DistanceGrid } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
 import type { FabricSpec } from './fabric';
-import { ClothPose, MAX_CLOTH_FRAME } from './timing';
+import { ClothPose, clothSubsteps, MAX_CLOTH_FRAME } from './timing';
 
 /**
  * 骨で動くメッシュ（SkinnedMesh）の一部を布にする。VRM に限らない。
@@ -104,11 +104,6 @@ export interface ClothWind {
   gust?: number;
 }
 
-/** ソルバーの刻み（秒）。フレームの長さに合わせてサブステップ数を決める */
-const SUBSTEP = 1 / 960;
-/** 1フレームのサブステップ数の上限（60fps のときの数） */
-const MAX_SUBSTEPS = 16;
-
 const _m4 = new THREE.Matrix4();
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
 /** 太ももが真下からこの角度（ラジアン）を超えて上がり始めると、形を覚えさせる力を抜き始め、RAISED_TO で抜ききる */
@@ -171,7 +166,7 @@ export class SkinnedCloth {
   static skipped = '';
 
   /** モデルが基準の姿勢のときに呼ぶ。布になる頂点がなければ null */
-  static create(given: SkinnedClothOptions): SkinnedCloth | null {
+  static create(given: SkinnedClothOptions, measured?: ReadonlyMap<THREE.SkinnedMesh, ModelPart<THREE.SkinnedMesh>>): SkinnedCloth | null {
     const options: SkinnedClothOptions = { ...SkinnedCloth.defaults, ...given, solver: { ...SkinnedCloth.defaults.solver, ...given.solver } };
     SkinnedCloth.skipped = '';
     const skip = (reason: string): null => { SkinnedCloth.skipped = reason; return null; };
@@ -181,7 +176,7 @@ export class SkinnedCloth {
     root.updateMatrixWorld(true);
     if (!mesh.geometry.index || !mesh.geometry.attributes.uv) return skip('メッシュに index か uv がない');
     const freeBones = new Set<THREE.Object3D>(options.clothBones);
-    const sk = describePart(mesh, freeBones);
+    const sk = measured?.get(mesh) ?? describePart(mesh, freeBones);
     if (options.clothWeights) {
       // 頂点ごとの指定は mesh.geometry の頂点順。部品は自分の頂点だけに詰めてあるので、位置で対応を取る
       const all = options.clothWeights, P = mesh.geometry.attributes.position, used = new Int32Array(P.count).fill(-1);
@@ -203,7 +198,7 @@ export class SkinnedCloth {
     const pieces: { bone: THREE.Object3D; triangles: number; grid: [number, number, number] }[] = [];
     for (const bodyMesh of options.colliders?.meshes ?? []) {
       if (bodyMesh === mesh || !bodyMesh.geometry.index) continue;
-      const body = describePart(bodyMesh, freeBones);
+      const body = measured?.get(bodyMesh) ?? describePart(bodyMesh, freeBones);
       // 骨は、親をたどって最初に当たる部品の骨に属する。先に stopBones の骨に当たるものは含めない
       const pieceOf = body.mesh.skeleton.bones.map((b) => {
         for (let o: THREE.Object3D | null = b; o; o = o.parent) {
@@ -465,9 +460,7 @@ export class SkinnedCloth {
       if (Math.abs(goal - this.raised) < 1e-3) this.raised = goal;
       this.cloth.o.shapeScale = 1 - this.raised;
     }
-    // 速いフレーム（120Hz など）では減らす。遅いフレームでは増やさない：増やすと計算が延びてさらに遅くなる
-    // （36fps のとき 26 サブステップになり、布の計算が 4ms から 18ms になった）
-    this.cloth.o.substeps = Math.max(4, Math.min(MAX_SUBSTEPS, Math.round(dt / SUBSTEP)));
+    this.cloth.o.substeps = clothSubsteps(dt, this.cloth.stats.substepMs);
     this.cloth.step(dt);
     this.write();
   }

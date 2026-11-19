@@ -103,7 +103,7 @@ export function createVrmSkirt(vrm: VrmLike, options: VrmSkirtOptions = {}): Ski
       bones: pieceBones.map(bone).filter((b): b is THREE.Object3D => !!b),
       stopBones: humanBones,
     },
-  });
+  }, new Map(parts.map(part => [part.mesh, part])));
 }
 
 /**
@@ -223,22 +223,23 @@ export function createVrmGarments(vrm: VrmLike, garments: Record<string, Garment
   for (const joint of vrm.springBoneManager?.joints ?? []) carried(joint.bone, humanBones, (b) => springBones.add(b));
   const kindOf = (g: { mesh: THREE.SkinnedMesh; spec: GarmentSpec }): 'hang' | 'rest' =>
     g.spec.kind ?? (weightShare(g.mesh, (b) => { const h = humanOf(b); return !!h && lowerBody.has(h); }) > 0.5 ? 'hang' : 'rest');
+  // Classify on the original rig, before replacing any garment's geometry.
+  const hanging: typeof meshes = [], resting: typeof meshes = [];
+  for (const g of meshes) (kindOf(g) === 'hang' ? hanging : resting).push(g);
   const clothMeshes = new Set<THREE.Object3D>(meshes.map((g) => g.mesh));
   // 上着が当たる体：布にしない部品のうち、揺れものにほとんど付いていないもの（体・顔・布にしない服。髪は外れる）
   const bodyMeshes = new Set<THREE.Object3D>();
-  vrm.scene.traverse((object) => {
+  if (resting.length) vrm.scene.traverse((object) => {
     const m = object as THREE.SkinnedMesh;
     if (m.isSkinnedMesh && !clothMeshes.has(m) && weightShare(m, (b) => springBones.has(b)) < 0.1) bodyMeshes.add(m);
   });
 
   const hung = new Map<string, SkinnedCloth[]>();
-  for (const g of meshes) {
-    if (kindOf(g) !== 'hang') continue;
+  for (const g of hanging) {
     const sk = createVrmSkirt(vrm, { ...skirtOptions, skirt: g.mesh, fabric: g.spec.fabric, notColliders: [...clothMeshes] });
     if (sk) { cloths.push(sk); hung.set(g.key, [...(hung.get(g.key) ?? []), sk]); } else console.warn(`「${g.key}」を吊る布にできなかった:`, SkinnedCloth.skipped);
   }
-  for (const g of meshes) {
-    if (kindOf(g) !== 'rest') continue;
+  for (const g of resting) {
     // 裾が外側に乗る、吊った服（over で指定したもの全部）
     const unders = (g.spec.over ?? []).flatMap((k) => hung.get(keyOf.get(bareName(k)) ?? k) ?? []);
     const under = underOf(unders);

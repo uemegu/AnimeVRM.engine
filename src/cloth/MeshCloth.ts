@@ -4,7 +4,7 @@ import { weld, capRims, buildSDF } from './sdf';
 import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
 import type { FabricSpec } from './fabric';
 import type { ClothWind } from './SkinnedCloth';
-import { ClothPose, MAX_CLOTH_FRAME } from './timing';
+import { ClothPose, clothSubsteps, MAX_CLOTH_FRAME } from './timing';
 
 /**
  * 骨のないメッシュ（ふつうの Mesh）を布にする。部品に分かれているだけで骨のないモデル（3D 生成のモデルなど）の
@@ -47,9 +47,6 @@ export interface MeshClothOptions {
   /** 生地（fabric.ts の名前か、曲げ剛性 N·m と重さ kg/m²）。曲げにくさと重さが決まる。既定はスーツ地 */
   fabric?: FabricSpec;
 }
-
-const SUBSTEP = 1 / 960;
-const MAX_SUBSTEPS = 16;
 
 const _m4 = new THREE.Matrix4();
 const _v = new THREE.Vector3();
@@ -294,7 +291,7 @@ export class MeshCloth {
       }
     }
     const dt = delta;
-    this.cloth.o.substeps = Math.max(4, Math.min(MAX_SUBSTEPS, Math.round(dt / SUBSTEP)));
+    this.cloth.o.substeps = clothSubsteps(dt, this.cloth.stats.substepMs);
     this.cloth.step(dt);
     this.write();
   }

@@ -95,8 +95,9 @@ export function solveHinges(x: Float64Array, w: ArrayLike<number>, C: Uint32Arra
     if (Cq > Math.PI) Cq -= 2 * Math.PI; else if (Cq < -Math.PI) Cq += 2 * Math.PI;
     // gradient of the angle (Bridson et al. 2003, "Simulation of clothing with folds and wrinkles")
     const f1 = el / s1, f2 = el / s2;
-    const g3a = (bx * ex + by * ey + bz * ez) / (el * s1), g3b = (cx * ex + cy * ey + cz * ez) / (el * s2);
-    const g4a = -(ax * ex + ay * ey + az * ez) / (el * s1), g4b = -(dx * ex + dy * ey + dz * ez) / (el * s2);
+    const invEdge2 = 1 / (ex * ex + ey * ey + ez * ez);
+    const g3a = (bx * ex + by * ey + bz * ez) * (invEdge2 * f1), g3b = (cx * ex + cy * ey + cz * ez) * (invEdge2 * f2);
+    const g4a = -(ax * ex + ay * ey + az * ez) * (invEdge2 * f1), g4b = -(dx * ex + dy * ey + dz * ez) * (invEdge2 * f2);
     const u1x = f1 * n1x, u1y = f1 * n1y, u1z = f1 * n1z, u2x = f2 * n2x, u2y = f2 * n2y, u2z = f2 * n2z;
     const u3x = g3a * n1x + g3b * n2x, u3y = g3a * n1y + g3b * n2y, u3z = g3a * n1z + g3b * n2z;
     const u4x = g4a * n1x + g4b * n2x, u4y = g4a * n1y + g4b * n2y, u4z = g4a * n1z + g4b * n2z;
@@ -429,7 +430,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       nx /= A2; ny /= A2; nz /= A2;
       // the wind here: weaker where it would have to come through the body, and uneven in space and time
       const inner = (nx * wx + ny * wy + nz * wz) * outSign > 0;
-      const k = (inner ? o.shield : 1) * (1 + o.gust * Math.sin(9 * x[a] + 6 * x[a + 1] + 7 * x[a + 2] + 11 * clock) * Math.sin(5 * x[a + 2] - 7 * clock));
+      const k = !wl ? 1 : (inner ? o.shield : 1) * (1 + o.gust * Math.sin(9 * x[a] + 6 * x[a + 1] + 7 * x[a + 2] + 11 * clock) * Math.sin(5 * x[a + 2] - 7 * clock));
       const rx = (v[a] + v[b] + v[c]) / 3 - wind[0] * k, ry = (v[a + 1] + v[b + 1] + v[c + 1]) / 3 - wind[1] * k, rz = (v[a + 2] + v[b + 2] + v[c + 2]) / 3 - wind[2] * k;
       const vn = rx * nx + ry * ny + rz * nz;
       const m = (-o.drag * Math.abs(vn) * vn + fill) * A2;
@@ -499,7 +500,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   }
 
   const wind: number[] = [0, 0, 0];
-  const stats = { asleep: false, watch: { accel: 0, speed: 0, drift: 0, tilt: 0, air: 0 }, ms: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
+  const stats = { asleep: false, watch: { accel: 0, speed: 0, drift: 0, tilt: 0, air: 0 }, ms: 0, substepMs: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
 
   function solve(C: Uint32Array, L: Float64Array, alpha: number): void {
     for (let q = 0; q < L.length; q++) {
@@ -604,7 +605,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   // Outside its grid a piece reports "far", so leaving it out changes nothing: the cloth's motion is the same to the bit
   // (checked on a breakdance and a walk, scratch/animevrm-cloth/fingerprint.mjs in 360toAvator).
   const CAND_EVERY = 4, NC = Math.max(1, cols.length);
-  const candN = new Uint8Array(n), cand = new Uint8Array(n * NC), touching = new Uint8Array(n * NC), aheadM = I12(), aheadInv = cols.map(() => I12());
+  const candN = new Uint8Array(n), cand = new Uint8Array(n * NC), aheadM = I12(), aheadInv = cols.map(() => I12());
   function findCands(s: number, ns: number, h: number): void {
     const reach = grab ? Infinity : o.maxSpeed * CAND_EVERY * h + 0.015, a2 = Math.min(1, (s + CAND_EVERY) / ns);
     for (let q = 0; q < cols.length; q++) { cols[q].motion.at(a2, aheadM); inv12(aheadM, aheadInv[q]); }
@@ -715,6 +716,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
   }
 
+  const bendWeights = new Float64Array(n);
   function step(dt: number): void {
     const t0 = performance.now();
     const ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), aL = o.shape / (h * h), aC = o.crease / (h * h);
@@ -738,12 +740,13 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     ref.motion.set(ref.prev, ref.M);
     for (const col of cols) col.motion.set(col.prev, col.M);
     const damp = Math.max(0, 1 - o.damping * h), air = Math.min(0.9, o.air * h), calm = Math.max(0, 1 - calmK * h);
+    for (let i = 0; i < n; i++) bendWeights[i] = w[i] * invMass[i];
     const gFrom = grab ? grab.prev.slice() : null;
     for (let s = 0; s < ns; s++) {
       const a = (s + 1) / ns;
       ref.motion.at(a, ref.cur); inv12(ref.cur, ref.inv);
       for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); col.motion.at(a, col.cur); inv12(col.cur, col.inv); }
-      if (s % CAND_EVERY === 0) findCands(s, ns, h);
+      if (cols.length && s % CAND_EVERY === 0) findCands(s, ns, h);
       // predict
       for (let i = 0; i < n; i++) {
         const k = i * 3;
@@ -775,7 +778,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
         if (s === ns - 1) grab.prev = [tx, ty, tz];
       }
       if (LL.length && o.shapeScale > 0.01 && s % o.shapeEvery === 0) solve(CL, LL, aL / (o.shapeEvery * o.shapeEvery) / Math.min(1, o.shapeScale));
-      hinges(CB, TB, 0, AB, 1 / (h * h), invMass);
+      solveHinges(x, bendWeights, CB, TB, 0, AB, 1 / (h * h));
       hinges(CD, TH, aC); solve(CS, LS, aS);   // stretch last: it has the final say
       if (o.thickness > 0) {
         if (s % o.selfEvery === 0) { if (pairsStale()) findPairs(); solveSelf(); }
@@ -791,11 +794,9 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
           const q = cand[base + e], col = cols[q], m = col.inv, px = x[k], py = x[k + 1], pz = x[k + 2];
           // into the piece's own space
           const lx = m[0] * px + m[1] * py + m[2] * pz + m[3], ly = m[4] * px + m[5] * py + m[6] * pz + m[7], lz = m[8] * px + m[9] * py + m[10] * pz + m[11];
-          // a point that touched this piece in the substep before most likely still does: distance and direction in one
-          // lookup. Otherwise the distance alone first, and the direction only if it touches
-          let sd: number;
-          if (touching[base + q]) { sd = col.sdf.sample(lx, ly, lz, g); if (sd >= col.margin[i]) { touching[base + q] = 0; continue; } }
-          else { if (col.sdf.sample(lx, ly, lz) >= col.margin[i]) continue; sd = col.sdf.sample(lx, ly, lz, g); touching[base + q] = 1; }
+          const margin = col.margin[i];
+          const sd = col.sdf.sample(lx, ly, lz, g, margin);
+          if (sd >= margin) continue;
           const c = col.cur;
           let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
@@ -832,7 +833,12 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     for (const col of cols) col.prev.set(col.M);
     for (const i of pinned) { const k = i * 3; pinPrev[k] = pinTarget[k]; pinPrev[k + 1] = pinTarget[k + 1]; pinPrev[k + 2] = pinTarget[k + 2]; }
     normals();
-    stats.ms += (performance.now() - t0 - stats.ms) * 0.1;
+    const elapsed = performance.now() - t0;
+    stats.ms += (elapsed - stats.ms) * 0.1;
+    if (!asleep) {
+      const cost = elapsed / o.substeps;
+      stats.substepMs += (cost - stats.substepMs) * 0.1;
+    }
     stats.asleep = asleep;
   }
 
