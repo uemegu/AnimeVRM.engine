@@ -188,6 +188,14 @@ export type ScrollingBackgroundConfig = z.infer<typeof ScrollingBackgroundConfig
 export const WAVE_GLASS_KINDS = ['underwater'] as const;
 export type WaveGlassKind = (typeof WAVE_GLASS_KINDS)[number];
 export const WAVE_GLASS_TARGETS = ['all', 'background', 'character'] as const;
+/**
+ * コマ打ち（キャラの姿勢を一定の間隔でだけ更新し、間は止めて見せる。アニメの作画の枚数を真似る）。
+ * twos = 2コマ打ち（24コマの2コマごと、毎秒12回）、threes = 3コマ打ち（毎秒8回）。カメラ・背景・演出はなめらかなまま
+ */
+export const POSE_STEPS = ['twos', 'threes'] as const;
+export type PoseStep = (typeof POSE_STEPS)[number];
+/** コマ打ちの1コマの長さ（秒） */
+export const POSE_STEP_SECONDS: Record<PoseStep, number> = { twos: 2 / 24, threes: 3 / 24 };
 export const SCENE_EFFECT_IDS = ['fireworks', 'crowd'] as const;
 export type SceneEffectId = (typeof SCENE_EFFECT_IDS)[number];
 export const SceneEffects = z.strictObject({
@@ -205,6 +213,8 @@ export const SceneEffects = z.strictObject({
   waveGlassArea: z.tuple([z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1), z.number().min(0).max(1)]).optional(),
   /** 透過光の強さの倍率（場所に登録した光源に掛ける。既定 1、0 で切る）。光源を登録した場所でだけ働く */
   transmittedLight: z.number().min(0).max(3).optional(),
+  /** コマ打ち（twos = 2コマ打ち、threes = 3コマ打ち、off で止める。既定 off）。キャラの動き・揺れもの・表情を刻み、カメラはなめらかなまま */
+  poseStep: z.enum(['off', ...POSE_STEPS]).optional(),
 });
 export type SceneEffects = z.infer<typeof SceneEffects>;
 

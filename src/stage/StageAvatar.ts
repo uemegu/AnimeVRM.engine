@@ -914,8 +914,37 @@ export class StageAvatar {
     this.isLipSyncActive = false;
   }
 
-  /** frame は感情演出の描画に使う（文字演出はカメラへ向ける・残像はレンダラーを使う） */
-  public update(delta: number, frame?: { elapsed: number; camera: THREE.Camera; renderer: THREE.WebGLRenderer }): void {
+  /**
+   * frame は感情演出の描画に使う（文字演出はカメラへ向ける・残像はレンダラーを使う）。
+   * poseDelta は姿勢（モーション・顔・表情・揺れもの・布）を進める時間。コマ打ちでは、コマの変わり目にだけ
+   * 前のコマからの時間を渡し、それ以外は 0（姿勢を止めたまま）。省略すると delta。
+   * poseSubsteps は poseDelta を何回に分けて進めるか。コマ打ちの1コマ（1/12〜1/8 秒）を一度に進めると、
+   * 布は時間が長すぎて計算をやめ（MAX_CLOTH_FRAME を超えると姿勢に戻すだけ）、揺れものも跳ねるので、刻んで進める
+   */
+  public update(delta: number, frame?: { elapsed: number; camera: THREE.Camera; renderer: THREE.WebGLRenderer }, poseDelta = delta, poseSubsteps = 1): void {
+    if (!this.vrm) return;
+    if (poseDelta > 0) for (let i = 0; i < poseSubsteps; i++) this.updatePose(poseDelta / poseSubsteps);
+
+    // 雨で濡れる（濡れるのは 3 秒ほど、乾くのは 30 秒ほどで変わる）
+    if (this.wetness !== this.wetnessTarget) {
+      const rate = this.wetnessTarget > this.wetness ? 1 / 3 : 1 / 30;
+      const step = rate * delta;
+      this.wetness = Math.abs(this.wetnessTarget - this.wetness) <= step
+        ? this.wetnessTarget
+        : this.wetness + Math.sign(this.wetnessTarget - this.wetness) * step;
+      this.applyWetness();
+    }
+    this.wetDrips?.update(delta);
+
+    // 5. 感情演出
+    if (frame) {
+      const blink = this.vrm.expressionManager?.getValue('blink') ?? 0;
+      this.effects?.update(delta, frame.elapsed, frame.camera, frame.renderer, blink);
+    }
+  }
+
+  /** 姿勢を delta 秒進める（モーション → 顔 → 表情 → 揺れもの → 布 → 小物） */
+  private updatePose(delta: number): void {
     if (!this.vrm) return;
 
     // 1. モーション再生（前のフレームで足した顔の向きを先に戻す）
@@ -985,23 +1014,6 @@ export class StageAvatar {
 
     // 4.6 小物を手の位置へ
     this.heldItem?.place();
-
-    // 4.7 雨で濡れる（濡れるのは 3 秒ほど、乾くのは 30 秒ほどで変わる）
-    if (this.wetness !== this.wetnessTarget) {
-      const rate = this.wetnessTarget > this.wetness ? 1 / 3 : 1 / 30;
-      const step = rate * delta;
-      this.wetness = Math.abs(this.wetnessTarget - this.wetness) <= step
-        ? this.wetnessTarget
-        : this.wetness + Math.sign(this.wetnessTarget - this.wetness) * step;
-      this.applyWetness();
-    }
-    this.wetDrips?.update(delta);
-
-    // 5. 感情演出
-    if (frame) {
-      const blink = this.vrm.expressionManager?.getValue('blink') ?? 0;
-      this.effects?.update(delta, frame.elapsed, frame.camera, frame.renderer, blink);
-    }
   }
 
   /**

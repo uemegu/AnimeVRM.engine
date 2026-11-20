@@ -32,7 +32,7 @@ import { ScreenEffects } from './ScreenEffects';
 import { RainGround } from './RainGround';
 import { StillImages, type CutinSettings, type StillImageSettings } from './StillImages';
 import type { EffectPresetName } from '../effects/text/types';
-import { WAVE_GLASS_TARGETS } from '../schema/stage';
+import { POSE_STEP_SECONDS, WAVE_GLASS_TARGETS } from '../schema/stage';
 import { disposeEnvironment, loadEnvironment, placeEnvironment } from './environments';
 import { HairShadowRenderer } from '../shader/HairShadow';
 import { CharacterMaskRenderer, DEFAULT_LIGHT_WRAP_PARAMS, EYE_LAYER, LightWrapShader, VisibleMaskPass } from '../postprocessing/LightWrap';
@@ -220,6 +220,8 @@ export class StageManager {
   /** 今の場所の遠景・3D背景を置き終えたら解決する（暗転はこれを待って明ける） */
   private locationReady: Promise<void> = Promise.resolve();
   private effects: SceneEffects = {};
+  /** コマ打ちで、前のコマから溜まった時間（秒。半フレーム早く進めた分だけ負になる）。null なら次のフレームですぐコマを進める（カットの頭など） */
+  private poseStepTime: number | null = null;
   /** 最後に指定された登場キャラ（場所が変わったら立ち位置を当て直す） */
   private castMembers: StageCastMember[] = [];
   private sunEffect: SunEffect;
@@ -1733,6 +1735,8 @@ export class StageManager {
     this.cutTime = 0;
     // getElapsedTime() は時計を進めて描画ループの delta を食うので、読むだけにする
     this.cutStartedAt = this.clock.elapsedTime;
+    // カットの頭は前のカットの姿勢を残さない
+    this.poseStepTime = null;
     this.appliedCut.clear();
     this.appliedCutCamera = '';
     this.carriedMove = this.cameraMove ? { move: this.cameraMove, time: this.cameraMoveTime } : null;
@@ -2342,6 +2346,33 @@ export class StageManager {
   }
 
   /**
+   * このフレームで姿勢を進める時間と、それを何回に分けて進めるか。コマ打ちでなければ delta を1回で。
+   * コマ打ちでは、1コマ分の時間が溜まったフレームで溜まった分（1コマの整数倍）を返し、それ以外は 0（姿勢を止めたまま見せる）
+   */
+  private stepPose(delta: number): { time: number; substeps: number } {
+    const step = this.effects.poseStep;
+    if (!step || step === 'off') {
+      this.poseStepTime = null;
+      return { time: delta, substeps: 1 };
+    }
+    const frame = POSE_STEP_SECONDS[step];
+    if (this.poseStepTime === null) {
+      this.poseStepTime = 0;
+      return { time: delta, substeps: 1 };
+    }
+    // 画面のフレームの間隔はゆれる（60Hz で 16〜17ms）。1コマ分に半フレーム足りないところで進めて、
+    // 止める枚数を 5・5・5…と揃える（きっちり 1コマ分を待つと 4・6 枚が混じってカクつく）
+    this.poseStepTime += delta;
+    if (this.poseStepTime < frame - delta * 0.5) return { time: 0, substeps: 0 };
+    const frames = Math.max(1, Math.round(this.poseStepTime / frame));
+    this.poseStepTime -= frames * frame;
+    const time = frames * frame;
+    // 布・揺れものは 1/30 秒以下ずつ進める（なめらかなときと同じ刻み）。タブを離れていたなど長く止まったあとは、
+    // 刻まずに一度で進める（布は姿勢に戻る。なめらかなときと同じ）
+    return { time, substeps: frames <= 2 ? Math.ceil(time * 30 - 1e-6) : 1 };
+  }
+
+  /**
    * メインレンダリングループ
     this.waveGlassPass.uniforms.uResolution.value.set(targetW, targetH);
     this.transmittedLightPass.setSize(targetW, targetH);
@@ -2379,10 +2410,12 @@ export class StageManager {
       const mouthOpen = this.getSpeakerMouthOpen?.() ?? 1;
       // 心の声（かっこで囲んだセリフ）は、ボイスがあっても口を動かさない
       const innerVoice = this.cut?.innerVoice ?? false;
+      const pose = this.stepPose(delta);
       for (const id of this.castIds) {
         const avatar = this.loadedAvatars.get(id);
         if (!avatar?.vrm) continue;
-        this.applyCutMotion(id, avatar);
+        // 立ち位置の移動も姿勢と一緒に刻む（足だけ止まって体が滑らないように）
+        if (pose.time > 0) this.applyCutMotion(id, avatar);
         if (!avatar.vrm.scene.visible) continue;
         const speaking = id === this.speakerId && !innerVoice;
         avatar.updateLipSync(speaking ? phoneme : undefined, LIP_SYNC_GAIN * mouthOpen);
@@ -2390,7 +2423,7 @@ export class StageManager {
         const gaze = this.gaze.get(id);
         avatar.setGaze(this.gazeTargetFor(id, gaze?.target), gaze?.headTurn ?? 0.5);
         avatar.setWind(this.raining ? null : this.presets.locations[this.currentLocationId]?.wind);
-        avatar.update(delta, { elapsed, camera: this.camera, renderer: this.renderer });
+        avatar.update(delta, { elapsed, camera: this.camera, renderer: this.renderer }, pose.time, pose.substeps);
         activeMeshes.push(avatar.vrm.scene);
       }
 
