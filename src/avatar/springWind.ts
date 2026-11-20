@@ -24,9 +24,11 @@ const DEFAULT_GUST = 0.6;
 const DIRECTION_SWAY = 0.25;
 
 function windWeight(boneName: string): number {
-  if (/hair/i.test(boneName)) return 1;
-  if (/skirt/i.test(boneName)) return 0.5;
-  return 0;
+  if (/bust|breast|boob|oppai|mune|chest|胸/i.test(boneName)) return 0;
+  if (/hair|kami|髪/i.test(boneName)) return 1;
+  if (/skirt|suso|スカート/i.test(boneName)) return 0.5;
+  // リボン・耳・しっぽ・マント・汎用名など、胸以外の揺れものも控えめに揺らす
+  return 0.5;
 }
 
 const _wind = new THREE.Vector3();

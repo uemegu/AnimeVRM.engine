@@ -431,16 +431,11 @@ export const CinematicAnimeShader = {
               float rimCore = pow(rimProfile, 1.4);
 
               vec3 baseCol = color;
-              float luma = getLuma(baseCol);
-
-              vec3 materialTint;
-              if (baseCol.b > baseCol.r * 1.12 && luma < 0.40) {
-                materialTint = mix(rimHue, vec3(0.88, 0.94, 1.0), 0.35);
-              } else if (luma > 0.58 && baseCol.r > baseCol.b * 0.90) {
-                materialTint = mix(rimHue, vec3(1.0, 0.95, 0.90), 0.35);
-              } else {
-                materialTint = mix(rimHue, vec3(1.0, 0.78, 0.42), 0.35);
-              }
+              float baseMax = max(baseCol.r, max(baseCol.g, baseCol.b));
+              float baseMin = min(baseCol.r, min(baseCol.g, baseCol.b));
+              vec3 baseHue = baseMax > 0.02 ? baseCol / baseMax : vec3(1.0);
+              float baseChroma = clamp((baseMax - baseMin) / max(baseMax, 1e-3), 0.0, 1.0);
+              vec3 materialTint = mix(rimHue, mix(vec3(1.0), baseHue, baseChroma * 0.55), 0.25);
 
               vec3 rimColor = mix(materialTint, vec3(1.0, 0.98, 0.95), rimCore * 0.65);
               float isOuterEdge = smoothstep(0.04, 0.22, outsideGrad);

@@ -75,9 +75,12 @@ export function createWetClothFrame(): WetClothFrame {
   };
 }
 
-/** 濡らす服か（白っぽい上着＝Yシャツ。制服のブレザー・ネクタイは除く） */
-export function isWetClothMaterial(matName: string, averageColor: THREE.Color | null): boolean {
-  if (!/Tops|shirt|シャツ/i.test(matName) || /Tie|Accessory/i.test(matName)) return false;
+const WET_CLOTH_EXCLUDE =
+  /Tie|Ribbon|Accessory|Shoes?|Socks?|Stocking|Bottoms?|Skirt|Pants?|Shorts?|Hat|Cap|Glasses|Wrist|Glove|靴|リボン|ネクタイ|アクセサリ|スカート|ズボン|帽子|手袋/i;
+
+/** 濡らす服か（白っぽい服。靴・スカート・ネクタイ・アクセサリ等の非上着と暗色の服は除く） */
+export function isWetClothMaterial(matName: string, averageColor: THREE.Color | null, meshName = ''): boolean {
+  if (WET_CLOTH_EXCLUDE.test(matName) || (meshName && WET_CLOTH_EXCLUDE.test(meshName))) return false;
   if (!averageColor) return false;
   const luma = 0.2126 * averageColor.r + 0.7152 * averageColor.g + 0.0722 * averageColor.b;
   return luma > 0.7;

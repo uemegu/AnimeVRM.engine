@@ -102,9 +102,57 @@ export function applySmoothNormalsToHierarchy(root: THREE.Object3D): void {
  * Flattens normals around the eye socket / inner corner of the eyes on face skin meshes.
  * In anime-style rendering, steep normals along the eye orbit crease catch lateral light
  * and create unwanted dark shadow lines (crease shadows) near the inner eye corner.
- * Flattening these normals towards the front (+Z) prevents premature shadowing.
+ * Flattening these normals towards the face front (±Z) prevents premature shadowing.
  */
 export function flattenEyeOrbitNormals(root: THREE.Object3D): void {
+  const isEyeMat = (mat: THREE.Material | undefined): boolean => {
+    if (!mat || (mat as { isOutline?: boolean }).isOutline) return false;
+    const name = mat.name || '';
+    return /EyeWhite|EyeIris|Eye|目|瞳|虹彩/i.test(name) && !/Eyeline|Eyelash|アイライン|まつ毛|まつげ/i.test(name);
+  };
+
+  // Pass 1: Collect eye vertex bounds across all meshes under root (handles both multi-material
+  // meshes with geo.groups and single-material meshes split by GLTFLoader).
+  let globalEyeMinX = Infinity, globalEyeMaxX = -Infinity;
+  let globalEyeMinY = Infinity, globalEyeMaxY = -Infinity;
+  let globalEyeMinZ = Infinity, globalEyeMaxZ = -Infinity;
+  let globalEyeCount = 0;
+
+  root.traverse((obj) => {
+    if (!(obj as THREE.Mesh).isMesh) return;
+    const mesh = obj as THREE.Mesh;
+    const geo = mesh.geometry;
+    if (!geo) return;
+    const posAttr = geo.getAttribute('position');
+    if (!posAttr) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const indexAttr = geo.index;
+    const groups = geo.groups && geo.groups.length > 0
+      ? geo.groups
+      : [{ start: 0, count: indexAttr ? indexAttr.count : posAttr.count, materialIndex: 0 }];
+
+    for (const group of groups) {
+      const mat = materials[group.materialIndex ?? 0];
+      if (!isEyeMat(mat)) continue;
+      const start = group.start;
+      const end = start + group.count;
+      for (let i = start; i < end; i++) {
+        const idx = indexAttr ? indexAttr.getX(i) : i;
+        const x = posAttr.getX(idx);
+        const y = posAttr.getY(idx);
+        const z = posAttr.getZ(idx);
+        globalEyeMinX = Math.min(globalEyeMinX, Math.abs(x));
+        globalEyeMaxX = Math.max(globalEyeMaxX, Math.abs(x));
+        globalEyeMinY = Math.min(globalEyeMinY, y);
+        globalEyeMaxY = Math.max(globalEyeMaxY, y);
+        globalEyeMinZ = Math.min(globalEyeMinZ, z);
+        globalEyeMaxZ = Math.max(globalEyeMaxZ, z);
+        globalEyeCount++;
+      }
+    }
+  });
+
+  // Pass 2: Flatten eye-orbit normals on face meshes, auto-detecting face front (+Z for VRM 1.0, -Z for VRM 0.x).
   root.traverse((obj) => {
     if (!(obj as THREE.Mesh).isMesh) return;
     const mesh = obj as THREE.Mesh;
@@ -121,59 +169,40 @@ export function flattenEyeOrbitNormals(root: THREE.Object3D): void {
     const normAttr = geo.getAttribute('normal');
     if (!posAttr || !normAttr) return;
 
-    let eyeMinY = Infinity, eyeMaxY = -Infinity;
-    let eyeMinX = Infinity, eyeMaxX = -Infinity;
-    let eyeMinZ = Infinity, eyeMaxZ = -Infinity;
-    let eyeCount = 0;
-
-    if (geo.groups && geo.groups.length > 0) {
-      for (const group of geo.groups) {
-        const mat = materials[group.materialIndex ?? 0];
-        if (mat && /EyeWhite|EyeIris|Eye/i.test(mat.name || '') && !/Eyeline|Eyelash/i.test(mat.name || '')) {
-          const indexAttr = geo.index;
-          const start = group.start;
-          const end = start + group.count;
-          for (let i = start; i < end; i++) {
-            const idx = indexAttr ? indexAttr.getX(i) : i;
-            const x = posAttr.getX(idx);
-            const y = posAttr.getY(idx);
-            const z = posAttr.getZ(idx);
-            eyeMinX = Math.min(eyeMinX, Math.abs(x));
-            eyeMaxX = Math.max(eyeMaxX, Math.abs(x));
-            eyeMinY = Math.min(eyeMinY, y);
-            eyeMaxY = Math.max(eyeMaxY, y);
-            eyeMinZ = Math.min(eyeMinZ, z);
-            eyeMaxZ = Math.max(eyeMaxZ, z);
-            eyeCount++;
-          }
-        }
-      }
+    const count = posAttr.count;
+    let frontSign = 1;
+    if (globalEyeCount > 0) {
+      frontSign = (globalEyeMinZ + globalEyeMaxZ) * 0.5 >= 0 ? 1 : -1;
+    } else {
+      let sumZ = 0;
+      for (let i = 0; i < count; i++) sumZ += posAttr.getZ(i);
+      frontSign = sumZ >= 0 ? 1 : -1;
     }
 
-    if (eyeCount === 0) {
+    let eyeMinX: number, eyeMaxX: number, eyeMinY: number, eyeMaxY: number, eyeBackDepth: number;
+    if (globalEyeCount === 0) {
       eyeMinX = 0.015;
       eyeMaxX = 0.060;
       eyeMinY = 1.415;
       eyeMaxY = 1.465;
-      eyeMinZ = 0.035;
-      eyeMaxZ = 0.065;
+      eyeBackDepth = 0.035;
     } else {
-      eyeMinX = Math.max(0.010, eyeMinX - 0.006);
-      eyeMaxX = eyeMaxX + 0.008;
-      eyeMinY = eyeMinY - 0.008;
-      eyeMaxY = eyeMaxY + 0.008;
+      eyeMinX = Math.max(0.010, globalEyeMinX - 0.006);
+      eyeMaxX = globalEyeMaxX + 0.008;
+      eyeMinY = globalEyeMinY - 0.008;
+      eyeMaxY = globalEyeMaxY + 0.008;
+      eyeBackDepth = frontSign > 0 ? globalEyeMinZ : -globalEyeMaxZ;
     }
 
-    const count = posAttr.count;
     let modified = false;
 
     for (let i = 0; i < count; i++) {
       const x = posAttr.getX(i);
       const absX = Math.abs(x);
       const y = posAttr.getY(i);
-      const z = posAttr.getZ(i);
+      const zForward = posAttr.getZ(i) * frontSign;
 
-      if (absX >= eyeMinX && absX <= eyeMaxX && y >= eyeMinY && y <= eyeMaxY && z >= eyeMinZ - 0.01) {
+      if (absX >= eyeMinX && absX <= eyeMaxX && y >= eyeMinY && y <= eyeMaxY && zForward >= eyeBackDepth - 0.01) {
         let nx = normAttr.getX(i);
         let ny = normAttr.getY(i);
         let nz = normAttr.getZ(i);
@@ -183,7 +212,7 @@ export function flattenEyeOrbitNormals(root: THREE.Object3D): void {
         const blend = 0.55 + 0.4 * innerFactor; // 55% to 95% front-facing
         nx = nx * (1 - blend);
         ny = ny * (1 - blend);
-        nz = nz * (1 - blend) + blend * 1.0;
+        nz = nz * (1 - blend) + blend * frontSign;
 
         const len = Math.hypot(nx, ny, nz);
         if (len > 1e-5) {

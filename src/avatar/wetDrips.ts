@@ -75,7 +75,14 @@ function findChin(vrm: VRM, head: THREE.Object3D): THREE.Vector3 | null {
       : [{ start: 0, count: index ? index.count : position.count, materialIndex: 0 }];
     for (const group of groups) {
       const material = materials[group.materialIndex ?? 0];
-      if (!material || !/Face.*SKIN/i.test(material.name) || /Outline/i.test(material.name)) continue;
+      if (
+        !material ||
+        (material as { isOutline?: boolean }).isOutline ||
+        !/Face|顔/i.test(material.name) ||
+        /Mouth|Eye|Brow|Lash|Line|Outline|口|目|眉|まつ/i.test(material.name)
+      ) {
+        continue;
+      }
       for (let i = group.start; i < group.start + group.count; i++) {
         _v.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(mesh.matrixWorld);
         _rel.subVectors(_v, headPos);

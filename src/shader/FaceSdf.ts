@@ -107,7 +107,7 @@ export function attachFaceSdf(
   for (const mesh of meshes) {
     const prevOnBeforeRender = mesh.onBeforeRender;
     mesh.onBeforeRender = function (...args) {
-      headBone.getWorldQuaternion(quat);
+      headBone.getWorldQuaternion(quat).multiply(built.headBindQuatInv);
       right.set(1, 0, 0).applyQuaternion(quat);
       forward.set(0, 0, built.frontSign).applyQuaternion(quat);
       // 顔の左右の向き（ヨー）だけで陰を決める。うつむき・首のかしげ・体の揺れで
@@ -123,20 +123,25 @@ export function attachFaceSdf(
 }
 
 /**
- * 顔の頂点を頭の骨の座標系（バインド姿勢）で読み、UV 空間に焼き込んでしきい値マップを作る。
- * 頭の座標系で作るので、実行時は頭の向きに対する光の角度だけでマップを引ける。
+ * 顔の頂点を頭の骨の原点（モデル空間の軸・バインド姿勢）で読み、UV 空間に焼き込んでしきい値マップを作る。
+ * 生ボーン固有のローカル軸（Maya 系など）に依存しないよう、バインド姿勢の頭ボーン回転を打ち消す。
  */
 function buildFaceSdfMap(
   meshes: THREE.Mesh[],
   headBone: THREE.Object3D,
   size: number
-): { texture: THREE.DataTexture; frontSign: number } | null {
-  // 全メッシュの頂点を頭の骨の空間（バインド姿勢）にまとめる。アニメーション中でも崩れない。
+): { texture: THREE.DataTexture; frontSign: number; headBindQuatInv: THREE.Quaternion } | null {
+  // 全メッシュの頂点を頭の骨原点・モデル空間軸（バインド姿勢）にまとめる。アニメーション中でも崩れない。
   const positions: number[] = [];
   const uvs: number[] = [];
   const triangles: number[] = [];
   const v = new THREE.Vector3();
   const toHead = new THREE.Matrix4();
+  const headBindWorld = new THREE.Matrix4();
+  const headBindPos = new THREE.Vector3();
+  const headBindQuat = new THREE.Quaternion();
+  const headBindScale = new THREE.Vector3();
+  let capturedBindQuat: THREE.Quaternion | null = null;
   for (const mesh of meshes) {
     const geometry = mesh.geometry;
     const position = geometry.getAttribute('position');
@@ -145,11 +150,16 @@ function buildFaceSdfMap(
     const skinned = mesh as THREE.SkinnedMesh;
     const boneIndex = skinned.isSkinnedMesh ? skinned.skeleton.bones.indexOf(headBone as THREE.Bone) : -1;
     if (boneIndex >= 0) {
-      toHead.multiplyMatrices(skinned.skeleton.boneInverses[boneIndex], skinned.bindMatrix);
+      headBindWorld.copy(skinned.skeleton.boneInverses[boneIndex]).invert();
+      headBindWorld.decompose(headBindPos, headBindQuat, headBindScale);
+      if (!capturedBindQuat) capturedBindQuat = headBindQuat.clone();
+      toHead.makeTranslation(-headBindPos.x, -headBindPos.y, -headBindPos.z).multiply(skinned.bindMatrix);
     } else {
       mesh.updateWorldMatrix(true, false);
       headBone.updateWorldMatrix(true, false);
-      toHead.copy(headBone.matrixWorld).invert().multiply(mesh.matrixWorld);
+      headBone.matrixWorld.decompose(headBindPos, headBindQuat, headBindScale);
+      if (!capturedBindQuat) capturedBindQuat = headBindQuat.clone();
+      toHead.makeTranslation(-headBindPos.x, -headBindPos.y, -headBindPos.z).multiply(mesh.matrixWorld);
     }
     const base = positions.length / 3;
     for (let i = 0; i < position.count; i += 1) {
@@ -281,7 +291,7 @@ function buildFaceSdfMap(
   texture.generateMipmaps = false;
   texture.flipY = false;
   texture.needsUpdate = true;
-  return { texture, frontSign };
+  return { texture, frontSign, headBindQuatInv: (capturedBindQuat ?? new THREE.Quaternion()).invert() };
 }
 
 /**

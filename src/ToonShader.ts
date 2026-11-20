@@ -242,7 +242,7 @@ export function applyToonShader(
   const hairRingMeshes = new Set<THREE.Mesh>();
   // 雨で濡れたシャツ: 胸の位置と向きは、濡らすシャツのメッシュで走査後に測る
   const wetClothFrame = createWetClothFrame();
-  let wetClothMesh: THREE.SkinnedMesh | null = null;
+  const wetClothMeshes: THREE.SkinnedMesh[] = [];
 
   // 色トレス（輪郭線を、その場所の塗りの影色を暗く濃くした色にする）の強さ。このキャラの全マテリアルで共有する
   const colorTraceUniform = { value: activeConfig?.outline?.colorTrace ?? 0 };
@@ -357,12 +357,19 @@ export function applyToonShader(
       }
       // 外形のリムライト: 1 = 髪, 2 = 服, 3 = 肌（目・眉などの顔のパーツは光らせない）
       const silRimKind = { value: kind === 'hair' ? 1 : kind === 'cloth' ? 2 : kind === 'face' || kind === 'body' ? 3 : 0 };
-      // 雨で濡れるのは白いYシャツ（アウトラインを除く）。濡れた版のテクスチャがあれば使う
+      // 雨で濡れるのは白っぽい服（アウトラインを除く）。濡れた版のテクスチャがあれば使う
       const wetClothTarget = {
-        value: !material.isOutline && kind === 'cloth' && isWetClothMaterial(material.name || '', material.map ? getTextureAverageColor(material.map) : null) ? 1 : 0,
+        value:
+          !material.isOutline &&
+          kind === 'cloth' &&
+          isWetClothMaterial(material.name || '', material.map ? getTextureAverageColor(material.map) : null, mesh.name || '')
+            ? 1
+            : 0,
       };
       const wetMap = wetClothTarget.value > 0 ? wetTextureFor(material.name || '') : null;
-      if (wetClothTarget.value > 0 && !wetClothMesh && (mesh as THREE.SkinnedMesh).isSkinnedMesh) wetClothMesh = mesh as THREE.SkinnedMesh;
+      if (wetClothTarget.value > 0 && (mesh as THREE.SkinnedMesh).isSkinnedMesh) {
+        wetClothMeshes.push(mesh as THREE.SkinnedMesh);
+      }
 
       // Preserve original VRM shade color, matcap factor & emissive properties
       if (material.shadeColorFactor) {
@@ -682,8 +689,8 @@ export function applyToonShader(
     faceSdfTargets.forEach((target) => (target.value = 1));
   }
 
-  // 雨で濡れたYシャツ: 胸の位置と向き
-  const hasWetCloth = !!wetClothMesh && measureWetClothFrame(vrm, wetClothMesh, wetClothFrame);
+  // 雨で濡れた服: 胸の位置と向き（複数メッシュがある場合は胸・肩ボーンを持つものから計測）
+  const hasWetCloth = wetClothMeshes.some((mesh) => measureWetClothFrame(vrm, mesh, wetClothFrame));
 
   // Apply eye highlight glow (luminous sparkle)
   const applyEyeGlow = (eyeGlowCfg?: EyeGlowConfig) => {

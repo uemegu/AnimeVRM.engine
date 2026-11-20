@@ -253,11 +253,24 @@ export class WateryEyeEffect {
 
     // Eyeボーンへの接続 (優先) または Headボーンへのフォールバック接続
     if (this.leftEyeBone && this.rightEyeBone) {
-      // Eyeボーンの子として追加 (瞳の前方にわずかにオフセット)
-      this.leftEyeMesh.position.set(0, 0, 0.016);
-      this.rightEyeMesh.position.set(0, 0, 0.016);
-      this.leftEyeBone.add(this.leftEyeMesh);
-      this.rightEyeBone.add(this.rightEyeMesh);
+      // 生の目ボーンのローカル軸はリグ（Maya系やVRM 0.x等）により異なるため、
+      // vrm.scene の正面（VRM 1.0 は +Z、VRM 0.x は -Z）基準でワールド位置・向きを求めてからボーンローカルへ変換する
+      const root = this.vrm.scene;
+      root.updateMatrixWorld(true);
+      const facing = this.vrm.meta?.metaVersion === '0' ? -1 : 1;
+      const rootQuat = root.getWorldQuaternion(new THREE.Quaternion());
+      if (facing < 0) {
+        rootQuat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI));
+      }
+      const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(rootQuat);
+      const placeFallback = (bone: THREE.Object3D, mesh: THREE.Mesh) => {
+        const worldPos = bone.getWorldPosition(new THREE.Vector3()).addScaledVector(forward, 0.016);
+        bone.add(mesh);
+        mesh.position.copy(bone.worldToLocal(worldPos));
+        mesh.quaternion.copy(bone.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(rootQuat));
+      };
+      placeFallback(this.leftEyeBone, this.leftEyeMesh);
+      placeFallback(this.rightEyeBone, this.rightEyeMesh);
     } else if (this.headBone) {
       const lx = this.config.leftEyeOffset.x;
       const ly = this.config.leftEyeOffset.y;
@@ -284,23 +297,32 @@ export class WateryEyeEffect {
     const root = this.vrm.scene;
     root.updateMatrixWorld(true);
     const toRoot = root.matrixWorld.clone().invert();
-    const sides = [new THREE.Box3(), new THREE.Box3()]; // x < 0, x >= 0（root の座標）
     const v = new THREE.Vector3();
-    root.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      if (!materials.some((m) => /EyeIris/i.test(m.name))) return;
-      // VRoid の顔は材質ごとの部品が頂点を共有するので、瞳の面が使う頂点だけを見る
-      const position = mesh.geometry.getAttribute('position');
-      const index = mesh.geometry.getIndex();
-      const toRootFromMesh = toRoot.clone().multiply(mesh.matrixWorld);
-      const count = index ? index.count : position.count;
-      for (let i = 0; i < count; i++) {
-        v.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(toRootFromMesh);
-        sides[v.x < 0 ? 0 : 1].expandByPoint(v);
-      }
-    });
+    const collectIrisBounds = (matcher: (name: string) => boolean): [THREE.Box3, THREE.Box3] => {
+      const boxes: [THREE.Box3, THREE.Box3] = [new THREE.Box3(), new THREE.Box3()]; // x < 0, x >= 0（root の座標）
+      root.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        if (!materials.some((m) => m && !(m as { isOutline?: boolean }).isOutline && matcher(m.name || ''))) return;
+        // VRoid の顔は材質ごとの部品が頂点を共有するので、瞳の面が使う頂点だけを見る
+        const position = mesh.geometry.getAttribute('position');
+        const index = mesh.geometry.getIndex();
+        const toRootFromMesh = toRoot.clone().multiply(mesh.matrixWorld);
+        const count = index ? index.count : position.count;
+        for (let i = 0; i < count; i++) {
+          v.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(toRootFromMesh);
+          boxes[v.x < 0 ? 0 : 1].expandByPoint(v);
+        }
+      });
+      return boxes;
+    };
+    let sides = collectIrisBounds((name) => /EyeIris|Iris|瞳|虹彩/i.test(name));
+    if (sides.some((box) => box.isEmpty())) {
+      sides = collectIrisBounds(
+        (name) => /Eye|目/i.test(name) && !/Eyeline|Eyelash|EyeWhite|EyeHighlight|アイライン|まつ毛|まつげ|白目/i.test(name)
+      );
+    }
     if (sides.some((box) => box.isEmpty())) return false;
 
     const boneX = (bone: THREE.Object3D) => bone.getWorldPosition(new THREE.Vector3()).applyMatrix4(toRoot);
