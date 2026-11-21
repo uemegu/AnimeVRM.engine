@@ -11,14 +11,27 @@
  * 2 つの比から、曲げ長さ c = (B / (weight × 9.8))^(1/3) が決まる（Peirce 1930。布の帯を水平に突き出したとき、どこまで
  * 垂れずに保てるかの目安。ASTM D1388 の曲げ硬さ試験と同じ考え方）。
  *
- * 使い方：`fabricOf('suiting')` か、値を直接 `{ bending, weight }` で渡す。
+ * - tensile：引っ張り。Kawabata の引っ張り試験（KES-FB1。最大荷重 Fm = 500 gf/cm = 490 N/m まで引く）の
+ *   LT（荷重と伸びの曲線の直線性）と WT（引っ張りの仕事、gf·cm/cm²）。伸びの上限 EMT（最大荷重での伸び）は
+ *   EMT = 2 WT / (LT Fm) で決まる（WT = LT × Fm × EMT / 2 が LT の定義）。上着の布（knit.ts）が使う
+ *
+ * 使い方：`fabricOf('suiting')` か、値を直接 `{ bending, weight, tensile }` で渡す。
  */
+
+export interface FabricTensile {
+  /** 荷重と伸びの曲線の直線性（KES の LT。1 = 直線、小さいほど伸び始めが柔らかい） */
+  linearity: number;
+  /** 最大荷重まで引く仕事（KES の WT、gf·cm/cm²） */
+  energy: number;
+}
 
 export interface Fabric {
   /** 曲げ剛性（N·m） */
   bending: number;
   /** 面積あたりの重さ（kg/m²） */
   weight: number;
+  /** 引っ張りの実測値（上着の布に要る。吊る布は伸びない布として解く） */
+  tensile?: FabricTensile;
 }
 
 export interface FabricPreset extends Fabric {
@@ -41,13 +54,13 @@ const RAMAIAH = 'Ramaiah, Radhalakshmi, Nachane「Comparative Analysis of Low-St
  */
 export const FABRICS = {
   /** 天竺ニット（肌着） */
-  jersey: { label: '天竺ニット（肌着）', bending: kesBending(0.0066), weight: kesWeight(12.55), source: RAMAIAH },
+  jersey: { label: '天竺ニット（肌着）', bending: kesBending(0.0066), weight: kesWeight(12.55), tensile: { linearity: 0.632, energy: 32.78 }, source: RAMAIAH },
   /** 天竺ニット（外衣。ポリウレタン 5%） */
-  jerseyOuter: { label: '天竺ニット（外衣）', bending: kesBending(0.0162), weight: kesWeight(15.86), source: RAMAIAH },
+  jerseyOuter: { label: '天竺ニット（外衣）', bending: kesBending(0.0162), weight: kesWeight(15.86), tensile: { linearity: 0.849, energy: 6.72 }, source: RAMAIAH },
   /** 平織りのシャツ地 */
-  shirting: { label: 'シャツ地（平織り）', bending: kesBending(0.027), weight: kesWeight(12.52), source: RAMAIAH },
+  shirting: { label: 'シャツ地（平織り）', bending: kesBending(0.027), weight: kesWeight(12.52), tensile: { linearity: 0.597, energy: 9.91 }, source: RAMAIAH },
   /** 平織りのスーツ地（ボトム用） */
-  suiting: { label: 'スーツ地（平織り）', bending: kesBending(0.1249), weight: kesWeight(24.6), source: RAMAIAH },
+  suiting: { label: 'スーツ地（平織り）', bending: kesBending(0.1249), weight: kesWeight(24.6), tensile: { linearity: 0.667, energy: 10.5 }, source: RAMAIAH },
 } satisfies Record<string, FabricPreset>;
 
 export type FabricName = keyof typeof FABRICS;
@@ -60,6 +73,21 @@ export function fabricOf(spec: FabricSpec): Fabric {
   const preset = FABRICS[spec];
   if (!preset) throw new Error(`知らない生地: ${spec}（${Object.keys(FABRICS).join(' / ')}）`);
   return preset;
+}
+
+/** KES の引っ張り試験の最大荷重（500 gf/cm、N/m） */
+export const KES_MAX_LOAD = 500 * 9.80665e-3 / 0.01;
+
+/**
+ * 引っ張りの曲線：幅 1m あたりの張力（N/m）が伸び ε に対して Fm (ε / EMT)^p。p は曲線の下の面積が LT × Fm × EMT / 2
+ * になる指数（p = 2 / LT - 1。LT = 1 で直線、LT が小さいほど伸び始めが柔らかい）。
+ * 返すのは EMT（最大荷重での伸び、比）と p。引っ張りの値がない生地は null
+ */
+export function tensileCurve(fabric: Fabric): { emt: number; power: number } | null {
+  const t = fabric.tensile;
+  if (!t) return null;
+  // WT（gf·cm/cm²）÷ Fm（gf/cm）は伸び（比）の単位になる
+  return { emt: (2 * t.energy) / (t.linearity * 500), power: 2 / t.linearity - 1 };
 }
 
 /** 曲げ長さ（m） */

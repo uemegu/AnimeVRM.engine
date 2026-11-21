@@ -23,7 +23,7 @@ import * as THREE from 'three';
 import { describeParts } from './parts';
 import { weld, capRims, buildSDF } from './sdf';
 import { fabricHinges, solveHinges } from './solver';
-import { fabricOf } from './fabric';
+import { fabricOf, tensileCurve, KES_MAX_LOAD } from './fabric';
 import { ClothPose, MAX_CLOTH_FRAME } from './timing';
 import { FrameInterpolation } from './frames';
 
@@ -72,17 +72,9 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   const o = {
     substeps: 8, gravity: -9.8,
     sleeveSide: true, sleeveReach: 0.2, sleeveTurn: -0.2, sleeveOut: 0.05, sleeveSound: 0.6,   // see "a sleeve stays around its arm"
-    headFriction: 0,     // against the head and the neck the fabric slides freely: with the body's friction the front of a top turned over
-                         // stayed on the chin, and only its back hung down behind the head
     tubeTurn: 0.5,       // a trunk point stays within 60 degrees of its own side: at 100 (the sleeves' limit) the whole ring could lie behind
                          // the head with its front points just past the sides, and did
     riseKeep: 0.05, riseBack: 0.8, riseUpright: 0.5, riseFrom: 0.45,   // see "back down once the body is upright again"
-    armsInward: true,    // The trunk's fabric is pushed off an arm toward the body's middle, never to the arm's far side. With the arms
-                         // raised a ring of the trunk can only go on toward the head around both arms (as a T-shirt comes off), and
-                         // it is too short: solved truly, the top jams at the shoulders with its edges at their limit. What the user
-                         // asked for (「スカートみたいな感じで捲れ上がらないと変」, and of a run where it hung over the head between the
-                         // arms: 「これで顔と腕の貫通がなければ完璧」) is the tube between the arms; the fabric then crosses the arm only
-                         // in the armpit, out of sight.
     tubeGuide: 0,        // the round post's radius (m). Off: at 0.115 it shook the top in the handstand's hold (95% point 4-6 mm against 1.3) and the front fell without it once the trunk went between the arms
     tubeSide: true, tubePast: 0.22, tubeOut: 0.09, tubeBack: true,   // tubeBack: a point that crossed goes back to its own side (false: only to the limit)
     tube: true, tubeStep: 0.05, tubeAround: 12, tubeKeep: 0.55, tubeStiff: 0.5, tubeBelowArms: 0.03,   // see "the body of the top keeps its tube"
@@ -106,28 +98,20 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     armsForAll: true,    // every point is tested against the arms too (the body of a top that falls over them upside down)
     headForAll: true,    // every point is tested against the head and neck, not only the ones near them as fitted
     viscosity: 300,      // 1/s: how fast a point's speed goes to its neighbours' mean
-    rigStretch: 1.25,    // how much longer than fitted (with ease) the bones may make an edge
+    rigStretch: 1.25,    // how much longer than fitted the bones may make an edge
     inertia: 1,
     noSkin: false, noPieces: false,   // for finding causes: the skin planes / the rigid pieces off
     contactIters: 3,     // with stretchIters 1: one pass of the edges, then hang and skin, three times
     skinReach: 0.05,     // a point that has moved this far along the skin from where it lay over its body vertex as fitted stops using
                          // that vertex's plane (fading out over the next 3 cm: switched off at once, the loose shoulders of a wide top
                          // crossed the line back and forth standing still)
-    stretch: 0,          // compliance of the edges (with 3e-7 and two passes a step the knit hung 5% longer than it is)
-    ease: 1.2,           // edges running around the body may be this much longer than in the fitted mesh: the knit's looseness
-                         // (how far it gives; it is pushed back out only when shorter than fitted: see LSc).
-                         // What gravity can do is set by this: the fitted knit is a snug tube, and at 1.08 on every edge the front
-                         // could hang 7 cm at the hem bent forward 80 degrees (2.7 cm standing) however the other limits were set
-    neckBoth: true,      // true: only edges with both ends that near the rim are taut (the rim's own line), not the ones leading away from it
-    neckTaut: 0.011,
     sit: 0.006,          // where the knit is carried (a short leash, skin facing up under it) it lies this far over the skin
     sitReach: -1,        // ...fading out as the leash grows by this much. Off (-1) by default: tried at 0.03, the collar's gap from the
                          // drawn skin did not shrink (median 8.4 -> 7.2 mm, 90% point 21 mm both) and skin showed at the armpits
                          // and shoulders. The floating collar was the fit's doing (fit_knit.py NECK_UP_MM) and is put right there.
-    easeAlong: 1.03,     // ...for edges along the trunk or a sleeve; `ease` is for edges around them
-    armFrom: 0.17,       // |x| beyond which an edge is on a sleeve (rest pose)
     spacing: 0.022,      // metres between the simulated samples along the fabric (rims: 0.6 of it)
-    fabric: 'jerseyOuter',   // the fabric (fabric.ts): its bending rigidity and weight set how the knit bends
+    fabric: 'jerseyOuter',   // the fabric (fabric.ts): its bending rigidity and weight set how the knit bends, its tensile test
+                             // (Kawabata's LT and WT) how far and how easily its edges stretch (see "the edges stretch as the fabric does")
     // the air, as on the skirt (solver.ts computeAero): per triangle of samples, pressure drag growing with the square of
     // the speed through the air along its normal, 0.5 * 1.2 kg/m3 * Cd 1.2 / the fabric's weight per area (drag: null takes
     // that), capped at maxAero m/s2. (Until 2026-11-16 the knit had no air at all: walking along, the front of a loose
@@ -138,8 +122,6 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     // skirt's `shield`, 0.3. Without it, walking forward blew the back of a T-shirt out behind as hard as it pressed the front.)
     shield: 0.3,
     minEdge: 0,     // points closer than this along an edge are merged (Tripo leaves sub-millimetre triangles: strain 400%, never at rest)
-    maxStrain: 1.06,     // an edge never gets longer than this times its rest length...
-    pullStrain: 1.4,     // ...except around a pinch while it is held: a knit gives
     stretchIters: 4,     // passes over the edges in each of the contactIters rounds. With one, the edges lost to the leash, the hang and
                          // the pieces, all kept exactly after them: in a breakdance the neck's rim, whose edges have no ease, was
                          // pulled out to twice its length (36 -> 70 cm, 105 cm at most) and stayed so, and the top hung off one
@@ -452,7 +434,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
         idx.push(i);
       }
       const pad = 0.05, sdf = buildSDF(capRims(weld(pos, idx)), { min: min.map((m) => m - pad), max: max.map((m) => m + pad), cell: o.cell, band: 0.04 });
-      const M = to12(pb[q].matrixWorld, new Float64Array(12)), col = { sdf, bone: pb[q], name: pieceNames[q], M, prev: M.slice(), cur: M.slice(), last: M.slice(), inv: new Float64Array(12), margin: new Float64Array(n), frameMotion: new FrameInterpolation(), stepMotion: new FrameInterpolation() };
+      const M = to12(pb[q].matrixWorld, new Float64Array(12)), col = { sdf, bone: pb[q], name: pieceNames[q], M, prev: M.slice(), cur: M.slice(), last: M.slice(), lastInv: new Float64Array(12), inv: new Float64Array(12), margin: new Float64Array(n), frameMotion: new FrameInterpolation(), stepMotion: new FrameInterpolation() };
       inv12(M, col.inv);
       cols.push(col);
     }
@@ -463,7 +445,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   }
   // how close each point is to each piece at rest (it is not pushed further out than that), and the skin under it
   const cand = Array.from({ length: n }, () => []);   // which pieces each point is tested against
-  const g = [0, 0, 0], sdRest = new Float64Array(n).fill(1), upRest = new Float64Array(n), nearPiece = new Int16Array(n).fill(-1), gLoc = new Float64Array(n * 3);
+  const g = [0, 0, 0], gIn = [0, 0, 0], sdRest = new Float64Array(n).fill(1), upRest = new Float64Array(n), nearPiece = new Int16Array(n).fill(-1), gLoc = new Float64Array(n * 3);
   for (let q = 0; q < cols.length; q++) {
     const col = cols[q], m = col.inv, c = col.M;
     for (let i = 0; i < n; i++) {
@@ -732,29 +714,82 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
   function moveGrab(px, py, pz) { if (grab) grab.target = [px, py, pz]; }
   function endGrab() { if (grab) { for (const i of grab.ids) w[i] = 1; grab = null; } }
 
-  // Limits and denominators depend on the pose and the grab, and stay fixed across
-  // all the stretch passes of this step. Positions still change after every edge.
-  const edgeLimit = new Float64Array(LS.length), edgeDen = new Float64Array(LS.length);
-  function solveStretch(alpha, comp) {
+  // The rest lengths and limits depend on the pose, and stay fixed across all the stretch passes of this step. Positions
+  // still change after every edge. `ih2` is 1 / h^2 of the substep.
+  // The stretch is XPBD with a constant compliance on a constraint shaped by the fabric's curve (lambdaE, from 0 every
+  // substep). The strip's energy stretched by u = strain / EMT is Fm L0 w EMT u^(p+1) / (p+1); with C = u^((p+1)/2) that is
+  // k C^2 / 2 for k = 2 Fm L0 w EMT / (p+1), so the compliance 1 / k stays fixed while C carries the curve, and the
+  // force along the edge, k C dC/dlength, is Fm w u^p as measured. The points move by their real inverse masses.
+  // (Until a review the same day: the strip's secant compliance at the strain of the moment in the linear XPBD update;
+  // the compliance changing with every pass is not what XPBD converges for, and one edge alone swung between 0.04% and
+  // 1.6% from pass to pass. And both ends moved alike, whatever their masses.)
+  const edgeLimit = new Float64Array(LS.length);
+  function solveStretch(ih2, comp) {
+    const { emt, power } = tensile, half = (power + 1) / 2;
     for (let q = 0; q < LS.length; q++) {
       const i = CS[q * 2], j = CS[q * 2 + 1], wi = w[i], wj = w[j], ws = wi + wj;
       if (!ws) continue;
       const ki = i * 3, kj = j * 3;
-      const dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2];
-      const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      let dx = x[kj] - x[ki], dy = x[kj + 1] - x[ki + 1], dz = x[kj + 2] - x[ki + 2];
+      let length = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (length < 1e-9) continue;
-      let correction = (length - LSe[q]) / (edgeDen[q] * length);
+      const L0 = LSe[q];
+      if (length > L0) {
+        const imi = wi * invMassC[i], imj = wj * invMassC[j];
+        const uu = Math.min(1, (length / L0 - 1) / emt) * TENS_N, u0 = uu | 0, f = uu - u0;
+        const C = tabC[u0] + (tabC[u0 + 1] - tabC[u0]) * f;
+        const gC = half * (tabG[u0] + (tabG[u0 + 1] - tabG[u0]) * f) / (emt * L0);   // dC / dlength
+        const aT = half / (KES_MAX_LOAD * L0 * stripW[q] * emt) * ih2;
+        const den = (imi + imj) * gC * gC + aT;
+        if (gC > 0 && den > 0) {
+          const dl = (-C - aT * lambdaE[q]) / den;
+          lambdaE[q] += dl;
+          const sc = gC * dl / length;   // along the edge's direction
+          x[ki] -= dx * sc * imi; x[ki + 1] -= dy * sc * imi; x[ki + 2] -= dz * sc * imi;
+          x[kj] += dx * sc * imj; x[kj + 1] += dy * sc * imj; x[kj + 2] += dz * sc * imj;
+          dx = x[kj] - x[ki]; dy = x[kj + 1] - x[ki + 1]; dz = x[kj + 2] - x[ki + 2];
+          length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+      }
+      let correction = 0;
       if (length > edgeLimit[q]) {
         heldBy[i] |= 64; heldBy[j] |= 64;
-        correction = Math.max(correction, (length - edgeLimit[q]) / (ws * length));
-      }
-      if (correction < 0) {
-        if (length >= LSc[q]) continue; // slack between the compressed and stretched lengths
-        correction = (length - LSc[q]) / ((ws + alpha) * length) * comp;
-      }
+        correction = (length - edgeLimit[q]) / (ws * length);
+      } else if (length < LSc[q]) correction = (length - LSc[q]) / (ws * length) * comp;   // between LSc and the rest length: slack
+      else continue;
       x[ki] += dx * correction * wi; x[ki + 1] += dy * correction * wi; x[ki + 2] += dz * correction * wi;
       x[kj] -= dx * correction * wj; x[kj + 1] -= dy * correction * wj; x[kj + 2] -= dz * correction * wj;
     }
+  }
+
+  // Out the way it came in: a point (or the middle of an edge or a face) inside a piece of the body now, which was outside
+  // it where it was when the substep began (world qx, qy, qz, with the piece where it was then), has crossed the piece's
+  // surface on the way and goes back out there, along the surface's normal at the crossing, not to the nearest surface.
+  // Through a thin forearm the nearest surface is often the far one, and the fabric came out on the arm's far side (lifting
+  // the hem with one hand, the front of a T-shirt lay over the forearm with only the hand through it). The crossing is the
+  // first place on the way where the distance to the surface reaches 0, found by stepping by that distance (sphere
+  // tracing: the grid's distances are no more than the true ones). Returns how far to push along g (set to the unit normal
+  // in the piece's frame), or NaN where it does not apply (the point was inside already, or no crossing was found).
+  function pushBack(col, lx, ly, lz, qx, qy, qz, margin) {
+    const mp = col.lastInv;
+    const ax = mp[0] * qx + mp[1] * qy + mp[2] * qz + mp[3], ay = mp[4] * qx + mp[5] * qy + mp[6] * qz + mp[7], az = mp[8] * qx + mp[9] * qy + mp[10] * qz + mp[11];
+    const dx = lx - ax, dy = ly - ay, dz = lz - az, len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-9) return NaN;
+    let t = 0;
+    for (let it = 0; it < 32; it++) {
+      const d = col.sdf.sample(ax + dx * t, ay + dy * t, az + dz * t);
+      if (d < 0) return NaN;   // inside where it started (or overshot): no crossing to go back through
+      if (d <= 2e-4) {
+        const ex = ax + dx * t, ey = ay + dy * t, ez = az + dz * t;
+        col.sdf.sample(ex, ey, ez, gIn, Infinity);
+        const nl = Math.hypot(gIn[0], gIn[1], gIn[2]); if (nl < 1e-9) return NaN;
+        g[0] = gIn[0] / nl; g[1] = gIn[1] / nl; g[2] = gIn[2] / nl;
+        return margin - ((lx - ex) * g[0] + (ly - ey) * g[1] + (lz - ez) * g[2]);
+      }
+      t += d / len;
+      if (t >= 1) return NaN;
+    }
+    return NaN;
   }
 
   // ---- the skirt under the hem: its cloth points with their outward normals, in a hash grid, once a frame ----
@@ -802,28 +837,27 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     if (d < o.skirtGap) { const p = o.skirtGap - d; x[k] += nx * p; x[k + 1] += ny * p; x[k + 2] += nz * p; }
   }
   const LSe = new Float64Array(LS), LSc = new Float64Array(LS), hangE = new Float64Array(hangLen);
-  // The neck's rim is taut: no ease on the edges within neckTaut of it along the fabric (rising to the full ease over the
-  // same distance again). With the ease everywhere the V's edge bellied 5-13 mm forward off the chest standing upright;
-  // its leash is untouched, so bent forward it still hangs away.
-  // The ease is around the body, not along it: an edge running along the trunk (up and down) or along a sleeve gets
-  // easeAlong, one running around gets the full ease. (The same ease on every edge made the knit 18% longer as well: the
-  // hem came down 5 cm standing.)
-  const easeE = new Float64Array(LS.length);
+  // ---- the edges stretch as the fabric does (2026-11-21; until then every top, whatever its fabric, had edges that could
+  // lengthen 20% around the body with no force at all, the knit's `ease`, and never more than 6%, 40% around a pinch) ----
+  // The fabric's tensile test (fabric.ts tensileCurve, Kawabata KES-FB1): its tension per metre of width is
+  // Fm (strain / EMT)^p, Fm = 490 N/m. Each edge stands for a strip of the fabric as wide as its share of the area around
+  // it over its length (a point's area shared out over its edges), solved as XPBD for points of their real masses (see
+  // solveStretch). No edge gets longer than at Fm (EMT): beyond the end of the test the curve is not known (a limit of the
+  // simulation, not of the fabric).
+  const tensile = tensileCurve(fabric);
+  if (!tensile) throw new Error('上着の布には生地の引っ張りの値（fabric の tensile）が要る');
+  const deg = new Uint16Array(n); for (let q = 0; q < CS.length; q++) deg[CS[q]]++;
+  const stripW = new Float64Array(LS.length);   // the width of fabric each edge stands for (m)
   for (let q = 0; q < LS.length; q++) {
-    const a = CS[q * 2] * 3, b = CS[q * 2 + 1] * 3;
-    const dx = localRest[b] - localRest[a], dy = localRest[b + 1] - localRest[a + 1], dz = localRest[b + 2] - localRest[a + 2], l = Math.hypot(dx, dy, dz) || 1;
-    const onArm = Math.abs((localRest[a] + localRest[b]) / 2) > o.armFrom, along = ((onArm ? dx : dy) / l) ** 2;   // the rest pose has the arms straight out
-    easeE[q] = o.ease + (o.easeAlong - o.ease) * along;
+    const i = CS[q * 2], j = CS[q * 2 + 1];
+    stripW[q] = (massC[i] / Math.max(1, deg[i]) + massC[j] / Math.max(1, deg[j])) / fabric.weight / Math.max(1e-6, LS[q]);
   }
-  {
-    const neck = []; for (let c = 0; c < n; c++) if (rim[c] && Math.abs(localRest[c * 3]) < 0.14 && localRest[c * 3 + 1] > armY - 0.16 && nearPiece[c] >= 0 && !/Arm/.test(cols[nearPiece[c]].name)) neck.push(c);
-    if (neck.length) {
-      const d = geodesic(n, adj, adjLen, neck, o.neckTaut * 2);
-      for (let q = 0; q < LS.length; q++) { const t = Math.min(1, Math.max(0, (o.neckBoth ? Math.max : Math.min)(d[CS[q * 2]], d[CS[q * 2 + 1]]) / o.neckTaut - 1)); easeE[q] = 1 + (easeE[q] - 1) * (Number.isFinite(t) ? t : 1); }
-    }
-  }
+  const lambdaE = new Float64Array(LS.length);
+  // u^((p+1)/2) and u^((p-1)/2) as tables over u = 0..1 (Math.pow on every edge of every pass took 4 ms a frame)
+  const TENS_N = 1024;
+  const tabC = Float64Array.from({ length: TENS_N + 2 }, (_, k) => Math.pow(Math.min(1, k / TENS_N), (tensile.power + 1) / 2));
+  const tabG = Float64Array.from({ length: TENS_N + 2 }, (_, k) => Math.pow(Math.min(1, k / TENS_N), (tensile.power - 1) / 2));
   const allPieces = cols.map((_, q) => q);
-  for (const col of cols) col.slip = /^(head|neck)$/.test(col.name);
   const limbCols = cols.filter((c) => /(Upper|Lower)Arm$/.test(c.name));
   // the drawn faces as triples of simulated points (for the faces' middles against the arms)
   const triS = (() => { const seen = new Set(), out = []; for (let f = 0; f < Ff.length; f += 3) { const a_ = sIdx[patch[Ff[f]]], b_ = sIdx[patch[Ff[f + 1]]], c_ = sIdx[patch[Ff[f + 2]]]; if (a_ === b_ || b_ === c_ || a_ === c_) continue; const key = [a_, b_, c_].sort((p_, q_) => p_ - q_).join(','); if (!seen.has(key)) { seen.add(key); out.push(a_, b_, c_); } } return Uint32Array.from(out); })();
@@ -950,7 +984,6 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     around.ang = new Float64Array(around.ids.length * 8);
   }
   const isTrunk = new Uint8Array(n); for (const i of around.ids) isTrunk[i] = 1;
-  const isLimbCol = cols.map((c) => /(Upper|Lower)Arm$/.test(c.name));
   let rise = o.riseKeep; const chestUpL = chestCol ? [chestCol.M[4], chestCol.M[5], chestCol.M[6]] : [0, 1, 0];
   const axP = new Float64Array(24);
   const neckSeg = axisCols.findIndex((c) => c.name === 'neck');
@@ -1061,7 +1094,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     }
   }
   function step(dt) {
-    const t0 = performance.now(), ns = o.substeps, h = dt / ns, aS = o.stretch / (h * h), damp = Math.max(0, 1 - (o.damping + sleepCalm) * h), ih = 1 / h;
+    const t0 = performance.now(), ns = o.substeps, h = dt / ns, ih2 = 1 / (h * h), damp = Math.max(0, 1 - (o.damping + sleepCalm) * h), ih = 1 / h;
     if (grab) { boostT = 0; boostOn = 1; calm = 1; }
     else {
       if (boostT < 1) { boostT = Math.min(1, boostT + dt / o.grabReturn); boostOn = boostT >= 1 ? 0 : 1 - boostT * boostT * (3 - 2 * boostT); }
@@ -1071,24 +1104,17 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
     supportNow();
     // a leash that got shorter (a point carried again) comes in at leashIn, a longer one is there at once
     for (let i = 0; i < n; i++) { leash[i] = leashT[i] >= leash[i] ? leashT[i] : Math.max(leashT[i], leash[i] - o.leashIn * dt); if (hangSlack[i] > 0) hangSlack[i] = Math.max(0, hangSlack[i] - o.leashIn * dt); }
-    // An edge is as long as in the fitted mesh (with ease), or as long as the bones stretch it now if that is more: linear
+    // An edge is as long as in the fitted mesh, or as long as the bones stretch it now if that is more: linear
     // blend skinning stretches the knit 10-20% around a lowered shoulder, and edges held to their rest length there fought
     // the short leashes without end (the samples' edges are solved to the end, unlike the full mesh's were).
-    const give = (o.pullStrain - o.maxStrain) / o.grabBoost * boostOn;
     for (let q = 0; q < LS.length; q++) {
       const i = CS[q * 2] * 3, j = CS[q * 2 + 1] * 3, lt = Math.sqrt((tgt[j] - tgt[i]) ** 2 + (tgt[j + 1] - tgt[i + 1]) ** 2 + (tgt[j + 2] - tgt[i + 2]) ** 2);
       // ...but no more than rigStretch times: a VRoid top's hem hangs on the legs' bones, and with the legs apart its edges
       // were allowed three times their length, which is no edge at all (neighbouring vertices 2 cm apart from frame to frame)
-      LSe[q] = Math.max(LS[q] * easeE[q], Math.min(lt, LS[q] * easeE[q] * o.rigStretch));
-      // The ease is how far the knit may give, not how big it wants to be: it is pushed back out only when shorter than the
-      // bones make it now (the fitted shape). (Pushed out to the eased length until 2026-11-16, the fitted knit's edges
-      // around the body were all 17% short, and awake the whole T-shirt swelled: 7 mm in the first frame awake, front and
-      // back, and asleep it went back to the fitted shape. Standing still it swelled and shrank like breathing.)
+      LSe[q] = Math.max(LS[q], Math.min(lt, LS[q] * o.rigStretch));
+      // pushed back out only when shorter than the bones make it now (the fitted shape)
       LSc[q] = Math.min(lt, LSe[q]);
-      const from = CS[q * 2], to = CS[q * 2 + 1];
-      const limit = o.maxStrain ? o.maxStrain + give * Math.max(boost[from], boost[to]) : 0;
-      edgeLimit[q] = o.maxStrain ? limit * LSe[q] : Infinity;
-      edgeDen[q] = w[from] + w[to] + aS + (limit > o.maxStrain ? 0.5 : 0);
+      edgeLimit[q] = LSe[q] * (1 + tensile.emt);
     }
     for (let i = 0; i < n; i++) {
       const sI = hangFrom[i]; if (sI < 0 || sI === i) continue;
@@ -1112,7 +1138,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       const a = (s + 1) / ns;
       // the skin planes too, from where the last step left them (as the pieces and the targets are)
       lerpPlanes(planeS, planeStep, plane, a);
-      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); col.stepMotion.at(a, col.cur); inv12(col.cur, col.inv); ball(col); }
+      for (const col of cols) { col.last.set(s === 0 ? col.prev : col.cur); inv12(col.last, col.lastInv); col.stepMotion.at(a, col.cur); inv12(col.cur, col.inv); ball(col); }
       for (let i = 0; i < n; i++) {
         const k = i * 3;
         xp[k] = x[k]; xp[k + 1] = x[k + 1]; xp[k + 2] = x[k + 2];
@@ -1135,11 +1161,12 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       lap(0);
       solveHinges(x, w, HC, HT, 0, HA, 1 / (h * h), invMassC);
       if (tubeL.length) keepTube();
+      lambdaE.fill(0);
       // edges, hang and the skin under the fitted points, together and contactIters times over: solved once each in turn,
       // fabric drawn taut over the chest (a VRoid top upside down, its hem's weight on it) went in with the edges and out
       // with the skin every substep and never came to rest while the body moved at all
       for (let ci = 0; ci < o.contactIters; ci++) {
-      for (let it = 0; it < o.stretchIters; it++) solveStretch(aS, compressPass);
+      for (let it = 0; it < o.stretchIters; it++) solveStretch(ih2, compressPass);
       // hang: not further from its support than the way there along the fabric (longer around a pinch while it is held)
       for (let i = 0; i < n; i++) {
         const sI = hangFrom[i];
@@ -1160,7 +1187,7 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       }
       lap(1);
       // ---- back down once the body is upright again (2026-11-14, the user: 「1回逆立ちすると服が戻らない」): the trunk's fabric
-      // went toward the head between the arms, through the armpits (armsInward); upright, it sat on the shoulders and round the
+      // went toward the head and ended up where it could not come back the way it went; upright, it sat on the shoulders and round the
       // neck, 35-40 cm above its place, and could not come back the way it went. While the chest is upright no trunk point may
       // be further toward the head than its bone-driven place plus `rise`, which closes from wherever the fabric is to
       // `riseKeep` at `riseBack` m/s; a point held by this is not tested against the body's pieces in that step (it is on
@@ -1192,30 +1219,17 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
           if (sd < o.edgeNear) nearMask[i] |= 1 << cl[q];
           if (sd >= col.margin[i]) continue;
           const c = col.cur;
+          let push = col.margin[i] - sd;
+          // out the way it came in (pushBack, 2026-11-21; until then the trunk's fabric was pushed toward the body's axis off
+          // an arm instead, `armsInward`, which let the trunk go through the arms)
+          if (sd < 0) { const back = pushBack(col, lx, ly, lz, xp[k], xp[k + 1], xp[k + 2], col.margin[i]); if (back === back) push = back; }
           let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
           const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1; gx /= gl; gy /= gl; gz /= gl;
-          // The trunk's fabric leaves an arm on the body's side of it, whichever surface is nearer (see armsInward): toward the
-          // nearest place on the body's axis, across the arm. Above the chest that is the chest -> head line. Below it, the
-          // hips -> chest line, carried on down past the hips: until 2026-11-16 a point below the chest was sent to the chest
-          // itself, mostly upward, and the sides of a T-shirt long enough to reach the hands were lifted 9 cm onto the hanging
-          // arms; the hem, one ring, then pulled the front up and in, and the front stood out round over the belly
-          if (o.armsInward && isTrunk[i] && isLimbCol[cl[q]] && chestCol) {
-            const cc = chestCol.cur, hc = (axisCols[axisCols.length - 1] || chestCol).cur, ex = hc[3] - cc[3], ey = hc[7] - cc[7], ez = hc[11] - cc[11];
-            let ox = cc[3], oy = cc[7], oz = cc[11], tt = ((px - cc[3]) * ex + (py - cc[7]) * ey + (pz - cc[11]) * ez) / (ex * ex + ey * ey + ez * ez || 1e-9);
-            if (tt < 0 && hipsCol && hipsCol !== chestCol) {
-              const bc = hipsCol.cur, fx_ = cc[3] - bc[3], fy_ = cc[7] - bc[7], fz_ = cc[11] - bc[11];
-              const u = Math.min(1, ((px - bc[3]) * fx_ + (py - bc[7]) * fy_ + (pz - bc[11]) * fz_) / (fx_ * fx_ + fy_ * fy_ + fz_ * fz_ || 1e-9));
-              ox = bc[3] + fx_ * u; oy = bc[7] + fy_ * u; oz = bc[11] + fz_ * u;
-            } else { tt = Math.min(1.6, Math.max(0, tt)); ox += ex * tt; oy += ey * tt; oz += ez * tt; }
-            const ix = ox - px, iy = oy - py, iz = oz - pz, il = Math.sqrt(ix * ix + iy * iy + iz * iz);
-            if (il > 0.01) { gx = ix / il; gy = iy / il; gz = iz / il; }
-          }
-          const push = col.margin[i] - sd; heldBy[i] |= 8;
+          heldBy[i] |= 8;
           x[k] += gx * push; x[k + 1] += gy * push; x[k + 2] += gz * push;
           const l = col.last, bx = l[0] * lx + l[1] * ly + l[2] * lz + l[3], by = l[4] * lx + l[5] * ly + l[6] * lz + l[7], bz = l[8] * lx + l[9] * ly + l[10] * lz + l[11];
           const sx = (x[k] - xp[k]) - (px - bx), sy = (x[k + 1] - xp[k + 1]) - (py - by), sz = (x[k + 2] - xp[k + 2]) - (pz - bz), sn = sx * gx + sy * gy + sz * gz;
-          const fr_ = col.slip ? o.headFriction : o.friction;
-          x[k] -= (sx - sn * gx) * fr_; x[k + 1] -= (sy - sn * gy) * fr_; x[k + 2] -= (sz - sn * gz) * fr_;
+          x[k] -= (sx - sn * gx) * o.friction; x[k + 1] -= (sy - sn * gy) * o.friction; x[k + 2] -= (sz - sn * gz) * o.friction;
         }
         if (skNear[i] >= 0) overSkirt(k, skNear[i]);
         // the leash
@@ -1230,17 +1244,18 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       if (o.edgeLimbs && !o.noPieces && s % o.edgeEvery === o.edgeEvery - 1) for (let q = 0; q < LS.length; q++) {
         const i = CS[q * 2], j = CS[q * 2 + 1], ki = i * 3, kj = j * 3, wi = w[i], wj = w[j];
         if (!wi && !wj) continue;
-        const trunkE = o.armsInward && (isTrunk[i] || isTrunk[j]);
         const maskE = nearMask[i] | nearMask[j]; if (!maskE || !(away[i] | away[j])) continue;
         const px = (x[ki] + x[kj]) / 2, py = (x[ki + 1] + x[kj + 1]) / 2, pz = (x[ki + 2] + x[kj + 2]) / 2;
         for (let c_ = 0; c_ < midCols.length; c_++) {
-          const col = midCols[c_], bw = col.bw; if (!(maskE >>> col.idx & 1) || (trunkE && col.isLimb) || (riseU && !col.isLimb)) continue;   // upright, the fitted top and the skin planes do it (and these moved a few points 5 mm standing still)
+          const col = midCols[c_], bw = col.bw; if (!(maskE >>> col.idx & 1) || (riseU && !col.isLimb)) continue;   // upright, the fitted top and the skin planes do it (and these moved a few points 5 mm standing still)
           if ((px - bw[0]) ** 2 + (py - bw[1]) ** 2 + (pz - bw[2]) ** 2 > col.br2) continue;
           const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11];
           const mg = col.mE[q], sd = col.sdf.sample(lx_, ly_, lz_, g, mg);
           if (sd >= mg) continue;
+          let out = mg - sd;
+          if (sd < 0) { const back = pushBack(col, lx_, ly_, lz_, (xp[ki] + xp[kj]) / 2, (xp[ki + 1] + xp[kj + 1]) / 2, (xp[ki + 2] + xp[kj + 2]) / 2, mg); if (back === back) out = back; }
           const c = col.cur; let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
-          const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = (mg - sd) / gl * 2 / (wi + wj) * (col.isLimb ? 1 : o.edgeSoft);   // the middle moves by the mean of the two ends
+          const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = out / gl * 2 / (wi + wj) * (col.isLimb ? 1 : o.edgeSoft);   // the middle moves by the mean of the two ends
           gx *= push; gy *= push; gz *= push;
           const still_ = 0;
           if (wi) { x[ki] += gx; x[ki + 1] += gy; x[ki + 2] += gz; xp[ki] += gx * still_; xp[ki + 1] += gy * still_; xp[ki + 2] += gz * still_; heldBy[i] |= 8; }
@@ -1250,17 +1265,18 @@ export function createVrmKnit(vrm, { part, bodyFilter, corr = null, opts = {} } 
       if (o.edgeLimbs && !o.noPieces && s % o.edgeEvery === o.edgeEvery - 1) for (let f = 0; f < triS.length; f += 3) {   // ...and the middle of every face
         const i = triS[f], j = triS[f + 1], l_ = triS[f + 2], ki = i * 3, kj = j * 3, kl = l_ * 3, ws = w[i] + w[j] + w[l_];
         if (!ws) continue;
-        const trunkF = o.armsInward && (isTrunk[i] || isTrunk[j] || isTrunk[l_]);
         const maskF = nearMask[i] | nearMask[j] | nearMask[l_]; if (!maskF || !(away[i] | away[j] | away[l_])) continue;
         const px = (x[ki] + x[kj] + x[kl]) / 3, py = (x[ki + 1] + x[kj + 1] + x[kl + 1]) / 3, pz = (x[ki + 2] + x[kj + 2] + x[kl + 2]) / 3;
         for (let c_ = 0; c_ < midCols.length; c_++) {
-          const col = midCols[c_], bw = col.bw; if (!(maskF >>> col.idx & 1) || (trunkF && col.isLimb) || (riseU && !col.isLimb)) continue;
+          const col = midCols[c_], bw = col.bw; if (!(maskF >>> col.idx & 1) || (riseU && !col.isLimb)) continue;
           if ((px - bw[0]) ** 2 + (py - bw[1]) ** 2 + (pz - bw[2]) ** 2 > col.br2) continue;
           const m = col.inv, lx_ = m[0] * px + m[1] * py + m[2] * pz + m[3], ly_ = m[4] * px + m[5] * py + m[6] * pz + m[7], lz_ = m[8] * px + m[9] * py + m[10] * pz + m[11];
           const mg = col.mT[f / 3], sd = col.sdf.sample(lx_, ly_, lz_, g, mg);
           if (sd >= mg) continue;
+          let out = mg - sd;
+          if (sd < 0) { const back = pushBack(col, lx_, ly_, lz_, (xp[ki] + xp[kj] + xp[kl]) / 3, (xp[ki + 1] + xp[kj + 1] + xp[kl + 1]) / 3, (xp[ki + 2] + xp[kj + 2] + xp[kl + 2]) / 3, mg); if (back === back) out = back; }
           const c = col.cur; let gx = c[0] * g[0] + c[1] * g[1] + c[2] * g[2], gy = c[4] * g[0] + c[5] * g[1] + c[6] * g[2], gz = c[8] * g[0] + c[9] * g[1] + c[10] * g[2];
-          const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = (mg - sd) / gl * 3 / ws * (col.isLimb ? 1 : o.edgeSoft);
+          const gl = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1, push = out / gl * 3 / ws * (col.isLimb ? 1 : o.edgeSoft);
           gx *= push; gy *= push; gz *= push;
           const still_ = 0;
           for (const t_ of [i, j, l_]) if (w[t_]) { x[t_ * 3] += gx; x[t_ * 3 + 1] += gy; x[t_ * 3 + 2] += gz; xp[t_ * 3] += gx * still_; xp[t_ * 3 + 1] += gy * still_; xp[t_ * 3 + 2] += gz * still_; heldBy[t_] |= 8; }
