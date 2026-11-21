@@ -5,6 +5,7 @@ import { WateryEyeEffect } from '../effects/eye/WateryEyeEffect';
 import { IrisShrinkEffect } from '../effects/eye/IrisShrinkEffect';
 import { TearEffect } from '../effects/tears/TearEffect';
 import { CryFaceEffect } from '../effects/cry/CryFaceEffect';
+import { PoutMouthEffect } from '../effects/pout/PoutMouthEffect';
 import { SweatEffect } from '../effects/sweat/SweatEffect';
 import { EffectTextManager } from '../effects/text/EffectTextManager';
 import type { EffectPresetName } from '../effects/text/types';
@@ -54,6 +55,7 @@ export class AvatarEffects {
   private readonly tears: TearEffect;
   private readonly sweat: SweatEffect;
   private readonly cryFace: CryFaceEffect;
+  private readonly poutMouth: PoutMouthEffect;
   private readonly texts: EffectTextManager;
   private fastMotion: FastMotionEffect | null = null;
 
@@ -86,6 +88,7 @@ export class AvatarEffects {
     this.tears = new TearEffect(vrm, { enabled: false });
     this.sweat = new SweatEffect(vrm, { enabled: false });
     this.cryFace = new CryFaceEffect(vrm);
+    this.poutMouth = new PoutMouthEffect(vrm);
     this.texts = new EffectTextManager(scene);
   }
 
@@ -153,6 +156,11 @@ export class AvatarEffects {
     if (this.awawaMouth === enabled) return;
     this.awawaMouth = enabled;
     this.cryFace.setMouth(enabled);
+  }
+
+  /** むくれた口（口の前に漫画の記号の口を貼る。正面から見たときだけ出る） */
+  public setPoutMouth(enabled: boolean): void {
+    this.poutMouth.setEnabled(enabled);
   }
 
   /** 頬赤・涙目の間は目を潤ませる */
@@ -283,6 +291,7 @@ export class AvatarEffects {
     this.tears.update(delta);
     this.sweat.update(delta);
     this.cryFace.update(delta, elapsed, camera);
+    this.poutMouth.update(delta, camera);
     this.applyRedfaceFace(delta, blinkWeight);
     this.wateryEyes.update(delta, elapsed, blinkWeight);
     if (this.blush || this.tearyEyes) this.wobbleEyeMaterials(elapsed);
@@ -361,6 +370,7 @@ export class AvatarEffects {
     this.tears.dispose();
     this.sweat.dispose();
     this.cryFace.dispose();
+    this.poutMouth.dispose();
     this.texts.dispose();
     this.fastMotion?.dispose();
     this.fastMotion = null;

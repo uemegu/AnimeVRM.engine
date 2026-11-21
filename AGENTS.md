@@ -128,6 +128,9 @@ AI のコーディングエージェントが作業前に読む説明書。パ�
 | 速い動きの残像 | `src/effects/motion/` | キャスト `look.fastMotion` |
 | 目が泳ぐ | `AvatarEffects.applyEyeWander` | キャスト `look.eyeWander`、カット状態 |
 | 表情（追加分・happy の目だけ化） | `src/avatar/shapeKeyExpressions.ts`、`happyEyesOnly.ts` | キャスト `expression`、カット状態 |
+| むくれた口の絵（ぷくーの口。元の口を隠し、肌と同じ材質の当て板で唇の赤みを覆う） | `src/effects/pout/PoutMouthEffect.ts` | 表情 `puku` のとき StageManager が出す（`AvatarEffects.setPoutMouth`） |
+| 頬を膨らませる・つままれる（形状キーを読み込み時に作る） | `src/avatar/cheekShapes.ts` | キャスト `expression`（`puku` は片頬で怒りマークも付く・`cheekPinch`・`cheekPinchLeft`・`cheekPinchRight`） |
+| 自分の手で頬をつまんで引っぱる | `src/avatar/cheekPinch.ts`（頬の形は `cheekShapes.ts`） | キャスト `look.cheekPinch`、カット状態 |
 | 口の動き・話すときの首と眉 | `src/audio/`、`src/avatar/talkingFace.ts` | `StageOptions.getSpeakerPhoneme` / `getSpeakerMouthOpen`、`CutTimeline.speechTone` |
 | 手が肌で止まる・髪が手を避ける・スカートのへこみ | `src/avatar/handClearance.ts`、`handColliders.ts`、`clothDent.ts`（手の形は `handShape.ts`） | 品質 `handClearance`、`clothDent` |
 | スカートを布にする | `src/cloth/` | 品質 `skirtCloth`（既定は切） |

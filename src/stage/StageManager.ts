@@ -1797,10 +1797,12 @@ export class StageManager {
         tearyEyes: key.tearyEyes ?? look.tearyEyes ?? false,
         tearDrops: look.tearDrops ?? true,
         awawaMouth: key.awawaMouth ?? look.awawaMouth ?? false,
-        anger: key.anger ?? look.anger,
+        // ぷくー（片頬を膨らませて怒る）は怒りマークを付ける
+        anger: (key.anger ?? look.anger) || (key.expression ?? member.expression) === 'puku',
         tears: key.tears ?? look.tears,
         faceSweat: look.faceSweat ?? false,
         eyeWander: key.eyeWander ?? look.eyeWander,
+        cheekPinch: key.cheekPinch ?? look.cheekPinch ?? false,
         fastMotion: look.fastMotion,
         motionSpeed: key.motionSpeed ?? look.motionSpeed,
       };
@@ -1826,12 +1828,16 @@ export class StageManager {
       if (!before && this.gaze.get(member.id)?.target !== effective.lookAtTarget) gazeArrived = true;
       this.gaze.set(member.id, { target: effective.lookAtTarget, headTurn: effective.headTurn });
       if (!before || before.motionSpeed !== effective.motionSpeed) avatar.setMotionSpeed(effective.motionSpeed);
+      // 頭出し・カットの最初はつまんだ姿から
+      if (!before || seek || before.cheekPinch !== effective.cheekPinch) avatar.setCheekPinch(effective.cheekPinch, !before || seek);
       const effects = avatar.effects;
       if (effects) {
         effects.setBlush(effective.blush);
         effects.setRedface(effective.redface);
         effects.setTearyEyes(effective.tearyEyes, effective.tearDrops);
         effects.setAwawaMouth(effective.awawaMouth);
+        // ぷくー（片頬を膨らませて怒る）は、口を漫画のむくれた口の絵にする
+        effects.setPoutMouth(effective.expression === 'puku' && !effective.awawaMouth);
         effects.setAnger(effective.anger);
         effects.setTears(effective.tears);
         effects.setFaceSweat(effective.faceSweat);

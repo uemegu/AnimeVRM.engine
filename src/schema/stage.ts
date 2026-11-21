@@ -274,6 +274,8 @@ export interface AvatarLook {
   faceSweat?: boolean;
   /** 目が泳ぐ強さ（0 で止まる） */
   eyeWander: number;
+  /** 自分の手で頬をつまむ（省略は false） */
+  cheekPinch?: 'left' | 'right' | 'both' | false;
   fastMotion: boolean;
   motionSpeed: number;
 }
@@ -316,6 +318,7 @@ export interface CutAvatarState {
   anger?: boolean;
   tears?: boolean;
   eyeWander?: number;
+  cheekPinch?: 'left' | 'right' | 'both' | false;
   motionSpeed?: number;
   /** 移動（at から duration 秒で to へ）と退場（at から duration 秒で透明になる・霧になる） */
   move?: { at: number; to: [number, number, number]; duration: number };

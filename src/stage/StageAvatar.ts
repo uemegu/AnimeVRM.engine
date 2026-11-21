@@ -10,6 +10,8 @@ import type { MaterialStyleParams, OutlineConfig } from './visual';
 import { getSeamlessLoopClip } from '../animation/seamlessLoop';
 import { replaceHappyWithEyesOnly } from '../avatar/happyEyesOnly';
 import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
+import { registerCheekShapes } from '../avatar/cheekShapes';
+import { CheekPinch, type CheekPinchSide } from '../avatar/cheekPinch';
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
 import { SkirtHold, type SkirtHoldOptions } from '../avatar/skirtHold';
@@ -344,6 +346,9 @@ export class StageAvatar {
   public effects: AvatarEffects | null = null;
   /** 手に持つ小物 */
   private heldItem: HeldItem | null = null;
+  /** 自分の手で頬をつまむ */
+  private cheekPinch: CheekPinch | null = null;
+  private pendingCheekPinch: CheekPinchSide | false = false;
   private pendingHeldItem: { item: string; hand?: 'left' | 'right' } | null = null;
   private motionSpeed = 1;
 
@@ -438,6 +443,7 @@ export class StageAvatar {
           VRMUtils.rotateVRM0(vrm);
           replaceHappyWithEyesOnly(vrm);
           registerShapeKeyExpressions(vrm);
+          const cheekPoints = registerCheekShapes(vrm);
           // 手と髪の接触判定は付けない（髪が手に当たって崩れるため）。handColliders.ts は残してある
           this.handClearance = HandClearance.create(vrm, this.handClearanceMode);
           this.skirtHold = SkirtHold.create(vrm);
@@ -445,6 +451,8 @@ export class StageAvatar {
           this.skirtHold?.setEnabled(this.skirtHoldEnabled);
           this.measureHandCapsules(vrm);
           // 手と頭の形は読み込み時の姿勢で測る
+          this.cheekPinch = CheekPinch.create(vrm, cheekPoints);
+          this.cheekPinch?.set(this.pendingCheekPinch, true);
           this.heldItem = new HeldItem(vrm);
           this.heldItem.set(this.pendingHeldItem);
           this.clothDent = ClothDent.create(vrm, this.clothDentEnabled);
@@ -570,6 +578,12 @@ export class StageAvatar {
   /** 髪とスカートを揺らす風（場所の wind）。null で止む */
   public setWind(wind: WindSettings | null | undefined): void {
     this.wind = wind ?? null;
+  }
+
+  /** 自分の手で頬をつまむ（false で手を戻す）。immediate なら手を運ぶ動きを飛ばす */
+  public setCheekPinch(side: CheekPinchSide | false, immediate = false): void {
+    this.pendingCheekPinch = side;
+    this.cheekPinch?.set(side, immediate);
   }
 
   /** 手に持つ小物（null で手放す） */
@@ -1010,6 +1024,7 @@ export class StageAvatar {
     this.handClearance?.restore();
     this.skirtHold?.restore();
     this.heldItem?.restore();
+    this.cheekPinch?.restore();
     if (this.mixer) {
       this.mixer.update(delta);
     }
@@ -1042,6 +1057,9 @@ export class StageAvatar {
 
     // 2. 表情クロスフェード
     this.updateExpressions(delta);
+
+    // 2.2 自分の手で頬をつまむ（手が肌から押し出されないよう、その処理の後。頬を引く量は表情に足す）
+    this.cheekPinch?.apply(delta);
 
     // 3. まばたき
     this.updateBlink(delta);
