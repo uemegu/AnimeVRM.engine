@@ -12,6 +12,9 @@ import { replaceHappyWithEyesOnly } from '../avatar/happyEyesOnly';
 import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
 import { HandClearance, type HandClearanceMode } from '../avatar/handClearance';
 import { ClothDent } from '../avatar/clothDent';
+import { SkirtHold, type SkirtHoldOptions } from '../avatar/skirtHold';
+import { measureHand, skinPart } from '../avatar/handShape';
+import type { ClothHandCapsule } from '../cloth/SkinnedCloth';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
 import { createVrmGarments, type GarmentCloth, type GarmentSpec } from '../cloth/vrm';
 import { SkinnedCloth, type ClothWind } from '../cloth/SkinnedCloth';
@@ -283,6 +286,8 @@ export interface StageAvatarOptions {
   skirtCloth?: boolean;
   /** 布が止まったら眠らせて計算を休む（既定 true） */
   clothSleep?: boolean;
+  /** 風で裾がめくれたら手で押さえる（布のスカートのときだけ。既定 false） */
+  skirtHold?: boolean;
   /** 布にする服（材質名かメッシュ名 → 生地など。cloth/vrm.ts の GarmentSpec）。書いた服だけを布にする */
   garments?: Record<string, GarmentSpec>;
 }
@@ -298,6 +303,14 @@ export class StageAvatar {
   public mixer: THREE.AnimationMixer | null = null;
   /** 手が肌（頭・太もも）に入らないよう腕をずらす（モーションの姿勢に足す） */
   private handClearance: HandClearance | null = null;
+  /** 風で裾がめくれたら手で押さえる（モーションの姿勢に足す） */
+  private skirtHold: SkirtHold | null = null;
+  private skirtHoldEnabled = false;
+  private skirtHoldOptions: Partial<SkirtHoldOptions> = {};
+  /** 布をよける手の形（読み込み時に測る。骨のローカル座標） */
+  private handCapsules: ClothHandCapsule[] = [];
+  /** 読み込み時の姿勢での体の前（ワールド） */
+  private restForward = new THREE.Vector3(0, 0, 1);
   private handClearanceMode: HandClearanceMode;
   /** 手に押されてスカートがへこむ */
   private clothDent: ClothDent | null = null;
@@ -403,6 +416,7 @@ export class StageAvatar {
     this.clothDentEnabled = options.clothDent ?? true;
     this.skirtClothEnabled = options.skirtCloth ?? false;
     this.clothSleep = options.clothSleep ?? true;
+    this.skirtHoldEnabled = options.skirtHold ?? false;
     this.garments = options.garments ?? {};
   }
 
@@ -426,6 +440,10 @@ export class StageAvatar {
           registerShapeKeyExpressions(vrm);
           // 手と髪の接触判定は付けない（髪が手に当たって崩れるため）。handColliders.ts は残してある
           this.handClearance = HandClearance.create(vrm, this.handClearanceMode);
+          this.skirtHold = SkirtHold.create(vrm);
+          this.skirtHold?.setOptions(this.skirtHoldOptions);
+          this.skirtHold?.setEnabled(this.skirtHoldEnabled);
+          this.measureHandCapsules(vrm);
           // 手と頭の形は読み込み時の姿勢で測る
           this.heldItem = new HeldItem(vrm);
           this.heldItem.set(this.pendingHeldItem);
@@ -609,6 +627,38 @@ export class StageAvatar {
     this.handClearance?.setMode(mode);
   }
 
+  /** 風で裾がめくれたら手で押さえるかを切り替える */
+  public setSkirtHold(enabled: boolean, options?: Partial<SkirtHoldOptions>): void {
+    this.skirtHoldEnabled = enabled;
+    if (options) this.skirtHoldOptions = { ...this.skirtHoldOptions, ...options };
+    this.skirtHold?.setOptions(this.skirtHoldOptions);
+    this.skirtHold?.setEnabled(enabled);
+  }
+
+  /** 押さえる芝居の今の状態（調べる用） */
+  public get skirtHoldState() { return this.skirtHold?.state ?? null; }
+
+  /** 布をよける手の形を、読み込み時の姿勢で測る（手のひら・指・前腕の手首寄り。骨のローカル座標で持つ） */
+  private measureHandCapsules(vrm: VRM): void {
+    vrm.scene.updateMatrixWorld(true);
+    const skin = skinPart(vrm);
+    const capsules: ClothHandCapsule[] = [];
+    for (const side of ['left', 'right'] as const) {
+      for (const segment of measureHand(vrm, side, skin) ?? []) {
+        const bone = vrm.humanoid.getRawBoneNode(segment.bone);
+        if (!bone) continue;
+        capsules.push({ bone, start: bone.worldToLocal(segment.start.clone()), end: bone.worldToLocal(segment.end.clone()), radius: segment.radius });
+      }
+    }
+    this.handCapsules = capsules;
+    const l = vrm.humanoid.getRawBoneNode('leftUpperLeg')?.getWorldPosition(new THREE.Vector3());
+    const r = vrm.humanoid.getRawBoneNode('rightUpperLeg')?.getWorldPosition(new THREE.Vector3());
+    if (l && r) {
+      const left = l.sub(r).setY(0).normalize();
+      this.restForward.crossVectors(left, new THREE.Vector3(0, 1, 0)).normalize();
+    }
+  }
+
   /** 手に押されてスカートがへこむかを切り替える */
   public setClothDent(enabled: boolean): void {
     this.clothDentEnabled = enabled;
@@ -634,6 +684,13 @@ export class StageAvatar {
     const cloths = createVrmGarments(vrm, this.garments, { knit: StageAvatar.knitOptions });
     this.skirtCloth = (cloths.find((c) => c instanceof SkinnedCloth) as SkinnedCloth | undefined) ?? null;
     this.otherCloths = cloths.filter((c) => c !== this.skirtCloth);
+    this.skirtCloth?.setHands(this.handCapsules);
+    // 押さえる手は、スカートの作った時の形の表面に当てる（布は読み込み時の姿勢で作られている）
+    if (this.skirtCloth && this.skirtHold) {
+      const c = this.skirtCloth.cloth;
+      // 布が体から離れて止まる距離（margin）と布の厚みの半分、手の外に残す距離
+      this.skirtHold.setSkirt(c.X0, c.restGap, c.n, c.x, { cloth: c.o.margin + c.o.thickness / 2, hand: c.o.handMargin });
+    }
     this.setClothSleep(this.clothSleep);
   }
 
@@ -951,6 +1008,7 @@ export class StageAvatar {
     for (const { bone, rotation } of this.appliedTurn) bone.quaternion.multiply(rotation.invert());
     this.appliedTurn = [];
     this.handClearance?.restore();
+    this.skirtHold?.restore();
     this.heldItem?.restore();
     if (this.mixer) {
       this.mixer.update(delta);
@@ -968,6 +1026,15 @@ export class StageAvatar {
       const emotion = Math.max(0, ...this.emotionWeights.values());
       const blink = this.vrm.expressionManager?.getValue('blink') ?? 0;
       this.appliedTurn.push(...this.talkingFace.update(delta, this.speech, emotion, blink));
+    }
+
+    // 1.58 風で裾がめくれたら手で押さえる（裾の持ち上がりは前のフレームの布で測る）
+    if (this.skirtHold) {
+      const cloth = this.skirtClothEnabled && this.wetnessTarget <= 0 ? this.skirtCloth : null;
+      const wind = cloth ? this.clothWind() : null;
+      const speed = wind ? Math.hypot(wind.velocity.x, wind.velocity.y, wind.velocity.z) : 0;
+      this.skirtHold.update(delta, cloth ? cloth.hemLift(this.restForward) : null, speed);
+      this.skirtHold.apply();
     }
 
     // 1.6 手が肌（頭・太もも）に入っていたら外へ出す（頭の向きが決まってから）

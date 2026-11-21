@@ -167,7 +167,7 @@ export interface ClothOptions {
   shape: number; shapeMin: number; shapeMax: number; shapePer: number; shapeScale: number;
   tetherSlack: number; margin: number; friction: number;
   air: number; drag: number; inflate: number; shield: number; gust: number; maxAero: number;
-  damping: number; pinBelowTop: number; grabRadius: number;
+  damping: number; pinBelowTop: number; grabRadius: number; handMargin: number; handFriction: number;
   sleep: boolean; quietAccel: number; quietSpeed: number; quietAir: number; calmAfter: number; sleepAfter: number; sleepSpeed: number;
   calmDamping: number; wakeDist: number; wakeAngle: number;
 }
@@ -222,6 +222,8 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     damping: 0.4,      // plain velocity damping, 1/s
     pinBelowTop: 0.012,   // points this close under the top rim are held too
     grabRadius: 0.03,
+    // hands (setCapsules): how far out of the capsule the cloth is kept (m), and how much of its slide along the hand it loses
+    handMargin: 0.003, handFriction: 0.6,   // 0.9: cloth blown against a hand hanging at the side wrapped round it and stayed on it
     // ---- sleep: with nothing moving the cloth from outside, it is brought to rest and then not simulated at all ----
     // "Nothing from outside": the hips do not change speed (quietAccel), the body's pieces and the held points do not move
     // against the hips (quietSpeed), no wind, no pinch. After calmAfter seconds of that the damping grows (to calmDamping),
@@ -381,6 +383,15 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
     return col;
   });
+  // how far each point is from the body at rest (m; the nearest piece, capped at the grids' band): room to press it in
+  const restGap = new Float64Array(n).fill(Infinity);
+  for (const col of cols) {
+    const m = col.inv;
+    for (let i = 0; i < n; i++) {
+      const px = X0[i * 3], py = X0[i * 3 + 1], pz = X0[i * 3 + 2];
+      restGap[i] = Math.min(restGap[i], col.sdf.sample(m[0] * px + m[1] * py + m[2] * pz + m[3], m[4] * px + m[5] * py + m[6] * pz + m[7], m[8] * px + m[9] * py + m[10] * pz + m[11]));
+    }
+  }
   const ref = { M: I12(), prev: I12(), cur: I12(), inv: I12(), motion: new FrameInterpolation() };
   const pinTarget = new Float64Array(X0), pinPrev = new Float64Array(X0);
   const frames = { ref, colliders: cols, pinTarget };
@@ -497,6 +508,89 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     const ids = grab.ids;
     endGrab();
     for (const i of ids) { v[i * 3] = vx; v[i * 3 + 1] = vy; v[i * 3 + 2] = vz; }
+  }
+
+  // ---- hands: capsules moved from outside (setCapsules, world, every frame before step) ----
+  // The hand is not pushed by the cloth: the cloth makes way for it (the cloth yields to the hand). Each capsule is a segment
+  // a-b with a radius; between the frame before and now it is moved linearly over the substeps, so a hand sweeping down
+  // carries the cloth with it instead of passing through it. Touching cloth is dragged along by the hand's own motion
+  // (`handFriction`, 1 = it does not slide on the palm at all): a palm on the hem keeps it there, as a hand holding a skirt
+  // down does. Tested after the body, so the body still has the last word (cloth caught between the palm and the thigh
+  // never ends up in the thigh; the hand placement leaves room for the cloth: avatar/skirtHold.ts).
+  const MAX_CAPS = 64, CAP = 7;   // [ax, ay, az, bx, by, bz, radius]
+  const capCur = new Float64Array(MAX_CAPS * CAP), capPrev = new Float64Array(MAX_CAPS * CAP);
+  let capN = 0, capFresh = true;   // capFresh: no frame before to move from (the first frame they are given)
+  const capA = new Float64Array(MAX_CAPS * CAP), capB = new Float64Array(MAX_CAPS * CAP);   // this substep and the one before
+  const capCandN = new Uint8Array(n);
+  let capCand = new Uint8Array(n * 4);
+  const capRel = new Float64Array(MAX_CAPS * 6), capSlept = new Float64Array(MAX_CAPS * 6);
+  let capsTouch = false;   // some capsule was near the cloth this frame
+  function setCapsules(data: ArrayLike<number> | null, count: number): void {
+    const c = data ? Math.min(MAX_CAPS, count) : 0;
+    if (c !== capN) capFresh = true;
+    capN = c;
+    for (let k = 0; k < c * CAP; k++) capCur[k] = data![k];
+  }
+  // which capsules each point may touch this frame: near the capsule's box swept from the frame before, grown by how far
+  // a point can travel in a frame
+  function findCapCands(dt: number): void {
+    capsTouch = false;
+    if (!capN) { capCandN.fill(0); return; }
+    const reach = o.maxSpeed * dt + o.handMargin + 0.01, per = Math.min(capN, 255);
+    if (capCand.length < n * per) capCand = new Uint8Array(n * per);
+    const box = new Float64Array(capN * 6);
+    for (let q = 0; q < capN; q++) {
+      const c = q * CAP, r = capCur[c + 6] + reach;
+      for (let a = 0; a < 3; a++) {
+        const lo = Math.min(capCur[c + a], capCur[c + 3 + a], capPrev[c + a], capPrev[c + 3 + a]);
+        const hi = Math.max(capCur[c + a], capCur[c + 3 + a], capPrev[c + a], capPrev[c + 3 + a]);
+        box[q * 6 + a] = lo - r; box[q * 6 + 3 + a] = hi + r;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      let cn = 0;
+      if (w[i]) {
+        const k = i * 3, px = x[k], py = x[k + 1], pz = x[k + 2];
+        for (let q = 0; q < capN; q++) {
+          const b = q * 6;
+          if (px < box[b] || px > box[b + 3] || py < box[b + 1] || py > box[b + 4] || pz < box[b + 2] || pz > box[b + 5]) continue;
+          capCand[i * per + cn++] = q;
+        }
+      }
+      capCandN[i] = cn;
+      if (cn) capsTouch = true;
+    }
+  }
+  function capsAt(a: number, out: Float64Array): void {
+    for (let k = 0; k < capN * CAP; k++) out[k] = capPrev[k] + (capCur[k] - capPrev[k]) * a;
+  }
+  function solveCapsules(): void {
+    const per = Math.min(capN, 255), m = o.handMargin, fr = o.handFriction;
+    for (let i = 0; i < n; i++) {
+      const cn = capCandN[i];
+      if (!cn || !w[i]) continue;
+      const k = i * 3;
+      for (let e = 0; e < cn; e++) {
+        const c = capCand[i * per + e] * CAP;
+        const ax = capA[c], ay = capA[c + 1], az = capA[c + 2], ux = capA[c + 3] - ax, uy = capA[c + 4] - ay, uz = capA[c + 5] - az;
+        const px = x[k], py = x[k + 1], pz = x[k + 2], uu = ux * ux + uy * uy + uz * uz;
+        let t = uu > 1e-12 ? ((px - ax) * ux + (py - ay) * uy + (pz - az) * uz) / uu : 0;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const cx = ax + ux * t, cy = ay + uy * t, cz = az + uz * t;
+        let dx = px - cx, dy = py - cy, dz = pz - cz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz), r = capA[c + 6] + m;
+        if (d >= r) continue;
+        if (d < 1e-7) continue;   // on the axis: no side to push to
+        dx /= d; dy /= d; dz /= d;
+        const push = r - d;
+        x[k] += dx * push; x[k + 1] += dy * push; x[k + 2] += dz * push;
+        // friction: the slide along the surface, against how the hand moved this spot in the substep
+        const bx = capB[c] + (capB[c + 3] - capB[c]) * t, by = capB[c + 1] + (capB[c + 4] - capB[c + 1]) * t, bz = capB[c + 2] + (capB[c + 5] - capB[c + 2]) * t;
+        const sx = (x[k] - xp[k]) - (cx - bx), sy = (x[k + 1] - xp[k + 1]) - (cy - by), sz = (x[k + 2] - xp[k + 2]) - (cz - bz);
+        const sn = sx * dx + sy * dy + sz * dz;
+        x[k] -= (sx - sn * dx) * fr; x[k + 1] -= (sy - sn * dy) * fr; x[k + 2] -= (sz - sn * dz) * fr;
+      }
+    }
   }
 
   const wind: number[] = [0, 0, 0];
@@ -672,6 +766,8 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       }
     }
     for (let p = 0; p < pinned.length; p++) { const k = pinned[p] * 3; against(pinTarget[k], pinTarget[k + 1], pinTarget[k + 2], pinRel, pinSlept, p * 3); }
+    // a hand near the cloth keeps it awake while it moves against the hips (a hand that just rests there does not)
+    if (capsTouch) for (let q = 0; q < capN; q++) for (let e = 0; e < 2; e++) { const c = q * CAP + e * 3; against(capCur[c], capCur[c + 1], capCur[c + 2], capRel, capSlept, q * 6 + e * 3); }
     watched++;
     // which way is up for the hips: asleep, the cloth hangs as it did when it fell asleep
     const ux = m[1], uy = m[5], uz = m[9], ul = Math.hypot(ux, uy, uz) || 1;
@@ -689,7 +785,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       const px = x[k], py = x[k + 1], pz = x[k + 2];
       xSlept[k] = m[0] * px + m[1] * py + m[2] * pz + m[3]; xSlept[k + 1] = m[4] * px + m[5] * py + m[6] * pz + m[7]; xSlept[k + 2] = m[8] * px + m[9] * py + m[10] * pz + m[11];
     }
-    colSlept.set(colRel); pinSlept.set(pinRel);
+    colSlept.set(colRel); pinSlept.set(pinRel); capSlept.set(capRel);
   }
   function wake(): void { asleep = false; }
   // asleep: every point where the hips carry it, at the speed they carry it
@@ -723,6 +819,8 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     const vmax = o.maxSpeed;
     rebuildsThisFrame = 0;
     if (!driven) followBody();
+    if (capFresh) { capPrev.set(capCur); capFresh = false; }
+    findCapCands(dt);
     let calmK = 0;
     if (o.sleep && !fitting) {
       const { quiet, moved } = watch(dt);
@@ -783,6 +881,8 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       if (o.thickness > 0) {
         if (s % o.selfEvery === 0) { if (pairsStale()) findPairs(); solveSelf(); }
       }
+      // hands, then the body (it has the last word)
+      if (capsTouch) { capsAt(s / ns, capB); capsAt(a, capA); solveCapsules(); }
       // tether and body
       for (let i = 0; i < n; i++) {
         if (!w[i]) continue;
@@ -832,6 +932,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     ref.prev.set(ref.M);
     for (const col of cols) col.prev.set(col.M);
     for (const i of pinned) { const k = i * 3; pinPrev[k] = pinTarget[k]; pinPrev[k + 1] = pinTarget[k + 1]; pinPrev[k + 2] = pinTarget[k + 2]; }
+    capPrev.set(capCur);
     normals();
     const elapsed = performance.now() - t0;
     stats.ms += (elapsed - stats.ms) * 0.1;
@@ -917,7 +1018,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
   // back to the rest shape; a driver passes where the points are in the pose of the moment instead (`positions`)
   function reset(positions: ArrayLike<number> | null = null): void {
     pairsValid = false; asleep = false; quietT = 0; watched = 0; stats.asleep = false;
-    endGrab(); v.fill(0);
+    endGrab(); v.fill(0); capFresh = true;
     if (positions) x.set(positions);
     else {
       x.set(X0);
@@ -942,7 +1043,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
 
   return { o, n, nF, F, x, v, w, X0, nrm, map, body, bodyPrev, frames, snapFrames, fitRestToGravity, tPin,
     get sleeping() { return asleep; },
-    get driven() { return driven; }, set driven(d) { driven = d; }, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, pinned, rimLow, pinY, topY, botY, hemY,
+    get driven() { return driven; }, set driven(d) { driven = d; }, restGap, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, setCapsules, pinned, rimLow, pinY, topY, botY, hemY,
     solveHinges: hinges, CD, TH, mass, fabric,
     knock,
     get grabbing() { return !!grab; },

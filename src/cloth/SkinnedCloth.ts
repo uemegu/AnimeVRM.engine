@@ -114,6 +114,14 @@ const DRAPE_TIME = 0.4;
 const JOINT_SHARE = 0.25;
 const _up = new THREE.Vector3(0, 1, 0);
 
+/** 布を押しのける手の一部（線分と太さ）。start・end は bone のローカル座標 */
+export interface ClothHandCapsule {
+  bone: THREE.Object3D;
+  start: THREE.Vector3;
+  end: THREE.Vector3;
+  radius: number;
+}
+
 /** リグの重み：[骨の番号, 重み] の並び */
 type Weights = [number, number][];
 
@@ -362,6 +370,66 @@ export class SkinnedCloth {
     to12(_m4.multiplyMatrices(this.hips.matrixWorld, this.hipsRestInverse), frames.ref.M);
     for (let q = 0; q < this.pieceBones.length; q++) to12(this.pieceBones[q].matrixWorld, frames.colliders[q].M);
     for (const i of this.cloth.pinned) this.pose(i, frames.pinTarget, i * 3, this.skinHeld);
+    this.readHands();
+  }
+
+  /** 手（setHands）。布は手を押さず、手をよけ、手のひらに触れた所は手と一緒に動く */
+  private hands: ClothHandCapsule[] = [];
+  private handData = new Float64Array(0);
+  setHands(hands: ClothHandCapsule[]): void {
+    this.hands = hands;
+    this.handData = new Float64Array(hands.length * 7);
+    if (!hands.length) this.cloth.setCapsules(null, 0);
+  }
+  private readHands(): void {
+    if (!this.hands.length) return;
+    const d = this.handData;
+    this.hands.forEach((hand, q) => {
+      const m = hand.bone.matrixWorld;
+      _v.copy(hand.start).applyMatrix4(m); _v2.copy(hand.end).applyMatrix4(m);
+      d[q * 7] = _v.x; d[q * 7 + 1] = _v.y; d[q * 7 + 2] = _v.z; d[q * 7 + 3] = _v2.x; d[q * 7 + 4] = _v2.y; d[q * 7 + 5] = _v2.z;
+      d[q * 7 + 6] = hand.radius * m.getMaxScaleOnAxis();
+    });
+    this.cloth.setCapsules(d, this.hands.length);
+  }
+
+  /**
+   * 裾がどれだけ持ち上がっているか（m、腰から見て、作った時の形より上がった分）。front は体の前（forward の側）の裾、
+   * back は後ろの裾の、それぞれ上がり方の大きい 2 割の平均。forward は作った時の姿勢での体の前（ワールド）
+   */
+  hemLift(forward: THREE.Vector3): { front: number; back: number } {
+    const c = this.cloth, M = c.frames.ref.M, x = c.x, X0 = c.X0;
+    // 腰の今の行列の逆で、今の点を作った時の姿勢へ戻す
+    const m = new Float64Array(12);
+    {
+      const a = M[0], b = M[1], cc = M[2], d = M[4], e = M[5], f = M[6], g = M[8], h = M[9], i = M[10];
+      const det = a * (e * i - f * h) - b * (d * i - f * g) + cc * (d * h - e * g), r = 1 / det;
+      m[0] = (e * i - f * h) * r; m[1] = (cc * h - b * i) * r; m[2] = (b * f - cc * e) * r;
+      m[4] = (f * g - d * i) * r; m[5] = (a * i - cc * g) * r; m[6] = (cc * d - a * f) * r;
+      m[8] = (d * h - e * g) * r; m[9] = (b * g - a * h) * r; m[10] = (a * e - b * d) * r;
+      for (const row of [0, 4, 8]) m[row + 3] = -(m[row] * M[3] + m[row + 1] * M[7] + m[row + 2] * M[11]);
+    }
+    let cx = 0, cz = 0, cnt = 0;
+    for (let k = 0; k < c.n; k++) { cx += X0[k * 3]; cz += X0[k * 3 + 2]; cnt++; }
+    cx /= cnt; cz /= cnt;
+    const front: number[] = [], back: number[] = [];
+    const fx = forward.x, fz = forward.z, fl = Math.hypot(fx, fz) || 1;
+    for (let k = 0; k < c.n; k++) {
+      if (!c.w[k] || X0[k * 3 + 1] > c.hemY) continue;
+      const px = x[k * 3], py = x[k * 3 + 1], pz = x[k * 3 + 2];
+      const ly = m[4] * px + m[5] * py + m[6] * pz + m[7];
+      const lift = ly - X0[k * 3 + 1];
+      ((X0[k * 3] - cx) * fx + (X0[k * 3 + 2] - cz) * fz) / fl > 0 ? front.push(lift) : back.push(lift);
+    }
+    const top = (list: number[]) => {
+      if (!list.length) return 0;
+      list.sort((p, q) => q - p);
+      const t = Math.max(1, Math.round(list.length * 0.2));
+      let sum = 0;
+      for (let k = 0; k < t; k++) sum += list[k];
+      return Math.max(0, sum / t);
+    };
+    return { front: top(front), back: top(back) };
   }
 
   /** 布の位置と法線を、腰のスキニング行列の逆を通して頂点へ書く */
