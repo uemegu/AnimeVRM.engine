@@ -1340,8 +1340,6 @@ export class StageManager {
       const position = this.resolvePosition(member);
       avatar.vrm.scene.position.set(...position);
       avatar.vrm.scene.rotation.y = member.rotationY ?? -position[0] * 0.5;
-      // 登場したときはその濡れ具合で出す（出ているあいだに変えたら数秒かけて濡れる）
-      avatar.setWetness(member.wet ?? 0, !avatar.vrm.scene.visible);
       if (!avatar.vrm.scene.visible) avatar.resetClothOnNextUpdate();
       avatar.vrm.scene.visible = true;
       avatar.setDaylight(member.daylight ?? 0);
@@ -2429,6 +2427,7 @@ export class StageManager {
         const gaze = this.gaze.get(id);
         avatar.setGaze(this.gazeTargetFor(id, gaze?.target), gaze?.headTurn ?? 0.5);
         avatar.setWind(this.raining ? null : this.presets.locations[this.currentLocationId]?.wind);
+        avatar.setRaining(this.raining);
         avatar.update(delta, { elapsed, camera: this.camera, renderer: this.renderer }, pose.time, pose.substeps);
         activeMeshes.push(avatar.vrm.scene);
       }

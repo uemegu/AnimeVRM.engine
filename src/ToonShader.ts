@@ -15,7 +15,6 @@ import { createHairShadowUniforms, injectHairShadow, HAIR_SHADOW_LAYER, HairShad
 import { injectHairRing, createHairRingHeadFrame, updateHairRingHeadFrame, HAIR_RING_UNIFORMS } from './shader/HairRing';
 import { SILHOUETTE_RIM_GLSL, SILHOUETTE_RIM_UNIFORMS } from './shader/SilhouetteRim';
 import { attachFaceSdf, createFaceSdfFrame, injectFaceSdf } from './shader/FaceSdf';
-import { createWetClothFrame, injectWetCloth, isWetClothMaterial, measureWetClothFrame, wetTextureFor } from './shader/WetCloth';
 import { CHARACTER_LAYER, EYE_LAYER } from './postprocessing/LightWrap';
 
 /** 輪郭線を視線方向の奥へずらす量（m）。関節の凹みで殻が表に出るのを隠す */
@@ -42,8 +41,6 @@ export type ToonShaderController = {
   updateEyeGlow: (cfg?: EyeGlowConfig) => void;
   updateBottomGradient: (cfg?: Partial<BottomGradientConfig>) => void;
   applyFullConfig: (config: ToonShaderAvatarConfig) => void;
-  /** 雨で濡れたシャツ（0 = 乾いている、1 = ずぶ濡れ）。濡らすシャツがなければ何もしない */
-  setWetness: (wetness: number) => void;
 };
 
 type MToonLikeMaterial = THREE.Material & {
@@ -240,9 +237,6 @@ export function applyToonShader(
   const faceSdfMeshes = new Set<THREE.Mesh>();
   const faceSdfTargets: Array<{ value: number }> = [];
   const hairRingMeshes = new Set<THREE.Mesh>();
-  // 雨で濡れたシャツ: 胸の位置と向きは、濡らすシャツのメッシュで走査後に測る
-  const wetClothFrame = createWetClothFrame();
-  const wetClothMeshes: THREE.SkinnedMesh[] = [];
 
   // 色トレス（輪郭線を、その場所の塗りの影色を暗く濃くした色にする）の強さ。このキャラの全マテリアルで共有する
   const colorTraceUniform = { value: activeConfig?.outline?.colorTrace ?? 0 };
@@ -357,19 +351,6 @@ export function applyToonShader(
       }
       // 外形のリムライト: 1 = 髪, 2 = 服, 3 = 肌（目・眉などの顔のパーツは光らせない）
       const silRimKind = { value: kind === 'hair' ? 1 : kind === 'cloth' ? 2 : kind === 'face' || kind === 'body' ? 3 : 0 };
-      // 雨で濡れるのは白っぽい服（アウトラインを除く）。濡れた版のテクスチャがあれば使う
-      const wetClothTarget = {
-        value:
-          !material.isOutline &&
-          kind === 'cloth' &&
-          isWetClothMaterial(material.name || '', material.map ? getTextureAverageColor(material.map) : null, mesh.name || '')
-            ? 1
-            : 0,
-      };
-      const wetMap = wetClothTarget.value > 0 ? wetTextureFor(material.name || '') : null;
-      if (wetClothTarget.value > 0 && (mesh as THREE.SkinnedMesh).isSkinnedMesh) {
-        wetClothMeshes.push(mesh as THREE.SkinnedMesh);
-      }
 
       // Preserve original VRM shade color, matcap factor & emissive properties
       if (material.shadeColorFactor) {
@@ -622,7 +603,6 @@ export function applyToonShader(
           shader.uniforms.uHairCrownJitter = { value: THREE.MathUtils.clamp(material.userData.hairCrownJitter, 0, 0.1) };
         }
         injectFaceSdf(shader, faceSdfTarget, faceSdfFrame);
-        injectWetCloth(shader, wetClothTarget, wetClothFrame, wetMap);
 
         shader.fragmentShader = shader.fragmentShader.replace(
           'void main() {',
@@ -688,9 +668,6 @@ export function applyToonShader(
   if (rawHeadBone && faceSdfMeshes.size > 0 && attachFaceSdf([...faceSdfMeshes], rawHeadBone, faceSdfFrame)) {
     faceSdfTargets.forEach((target) => (target.value = 1));
   }
-
-  // 雨で濡れた服: 胸の位置と向き（複数メッシュがある場合は胸・肩ボーンを持つものから計測）
-  const hasWetCloth = wetClothMeshes.some((mesh) => measureWetClothFrame(vrm, mesh, wetClothFrame));
 
   // Apply eye highlight glow (luminous sparkle)
   const applyEyeGlow = (eyeGlowCfg?: EyeGlowConfig) => {
@@ -1123,9 +1100,6 @@ export function applyToonShader(
       if (!isSilhouette) {
         setupEyeMaterials();
       }
-    },
-    setWetness: (wetness) => {
-      wetClothFrame.wetness.value = hasWetCloth ? THREE.MathUtils.clamp(wetness, 0, 1) : 0;
     },
     dispose: () => {},
   };

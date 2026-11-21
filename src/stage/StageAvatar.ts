@@ -20,7 +20,6 @@ import type { ClothHandCapsule } from '../cloth/SkinnedCloth';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
 import { createVrmGarments, type GarmentCloth, type GarmentSpec } from '../cloth/vrm';
 import { SkinnedCloth, type ClothWind } from '../cloth/SkinnedCloth';
-import { WetDrips } from '../avatar/wetDrips';
 import { AvatarEffects } from './AvatarEffects';
 import { idleMotionUrl, resolveAssetUrl } from '../utils/path';
 import { setDaylight } from '../scene/Daylight';
@@ -332,14 +331,12 @@ export class StageAvatar {
   private readonly garments: Record<string, GarmentSpec>;
   /** 風で髪とスカートを揺らす */
   private springWind: SpringWind | null = null;
-  private wetDrips: WetDrips | null = null;
   /** 話している間の首と眉の芝居 */
   private talkingFace: TalkingFace | null = null;
   /** 話している声の手がかり（口パクに渡された今の母音・声の大きさ・セリフの調子。話者でなければ母音は undefined） */
   private speech: SpeechInput = { phoneme: undefined };
-  /** 雨で濡れた具合（今の値と、近づけていく値） */
-  private wetness = 0;
-  private wetnessTarget = 0;
+  /** 雨が降っているか（足元の影を薄くする） */
+  private raining = false;
   private wind: WindSettings | null = null;
   public shaderController: ToonShaderController | null = null;
   /** 感情演出（頬赤・涙・汗・文字演出など）。モデルの読み込み後に作る */
@@ -457,13 +454,12 @@ export class StageAvatar {
           this.heldItem.set(this.pendingHeldItem);
           this.clothDent = ClothDent.create(vrm, this.clothDentEnabled);
           this.springWind = SpringWind.create(vrm);
-          this.wetDrips = WetDrips.create(vrm, this.scene);
           this.talkingFace = TalkingFace.create(vrm);
 
           // 1. スムース法線の事前計算（綺麗なアニメアウトライン用）
           applySmoothNormalsToHierarchy(vrm.scene);
 
-          // 1.5 スカートの布。形を測る処理（へこみ・濡れ）の後、モーションを当てる前の姿勢で作る。
+          // 1.5 スカートの布。形を測る処理（へこみ）の後、モーションを当てる前の姿勢で作る。
           // スカートのジオメトリを差し替えるので、スムース法線の後
           if (this.skirtClothEnabled) this.createCloths(vrm);
           else if (Object.keys(this.garments).length > 0) this.restoreClothRestPose = this.captureClothPose(vrm);
@@ -483,7 +479,6 @@ export class StageAvatar {
             camera: this.camera,
             hairShadow: this.hairShadow,
           });
-          this.applyWetness();
 
           // 4. アニメーションミキサー初期化
           this.mixer = new THREE.AnimationMixer(vrm.scene);
@@ -598,21 +593,9 @@ export class StageAvatar {
     if (this.vrm) setDaylight(this.vrm.scene, amount);
   }
 
-  /**
-   * 雨で濡れた具合（0 = 乾いている、1 = ずぶ濡れ）。シャツが襟から裾へ濡れ、あご・指先から水滴が落ちる。
-   * immediate でなければ、濡れるときは数秒、乾くときはゆっくり変わる
-   */
-  public setWetness(wetness: number, immediate = false): void {
-    this.wetnessTarget = THREE.MathUtils.clamp(wetness, 0, 1);
-    if (immediate) {
-      this.wetness = this.wetnessTarget;
-      this.applyWetness();
-    }
-  }
-
-  private applyWetness(): void {
-    this.shaderController?.setWetness(this.wetness);
-    this.wetDrips?.setWetness(this.wetness);
+  /** 雨が降っているか（足元の影を薄くする） */
+  public setRaining(raining: boolean): void {
+    this.raining = raining;
   }
 
   /** 全体の不透明度（1 で通常。去っていくキャラを薄くして消すとき） */
@@ -996,16 +979,6 @@ export class StageAvatar {
     if (!this.vrm) return;
     if (poseDelta > 0) for (let i = 0; i < poseSubsteps; i++) this.updatePose(poseDelta / poseSubsteps);
 
-    // 雨で濡れる（濡れるのは 3 秒ほど、乾くのは 30 秒ほどで変わる）
-    if (this.wetness !== this.wetnessTarget) {
-      const rate = this.wetnessTarget > this.wetness ? 1 / 3 : 1 / 30;
-      const step = rate * delta;
-      this.wetness = Math.abs(this.wetnessTarget - this.wetness) <= step
-        ? this.wetnessTarget
-        : this.wetness + Math.sign(this.wetnessTarget - this.wetness) * step;
-      this.applyWetness();
-    }
-    this.wetDrips?.update(delta);
 
     // 5. 感情演出
     if (frame) {
@@ -1045,7 +1018,7 @@ export class StageAvatar {
 
     // 1.58 風で裾がめくれたら手で押さえる（裾の持ち上がりは前のフレームの布で測る）
     if (this.skirtHold) {
-      const cloth = this.skirtClothEnabled && this.wetnessTarget <= 0 ? this.skirtCloth : null;
+      const cloth = this.skirtClothEnabled ? this.skirtCloth : null;
       const wind = cloth ? this.clothWind() : null;
       const speed = wind ? Math.hypot(wind.velocity.x, wind.velocity.y, wind.velocity.z) : 0;
       this.skirtHold.update(delta, cloth ? cloth.hemLift(this.restForward) : null, speed);
@@ -1067,8 +1040,8 @@ export class StageAvatar {
     // 3.5 目が泳ぐ（視線にずれを足す）
     this.effects?.applyEyeWander(delta, this.gazeTarget);
 
-    // 4. VRM SpringBone・Humanoid更新（風は揺れものの重力に足す。濡れた髪・服は重いので風に揺らさない）
-    this.springWind?.update(delta, this.wetnessTarget > 0 ? null : this.wind);
+    // 4. VRM SpringBone・Humanoid更新（風は揺れものの重力に足す）
+    this.springWind?.update(delta, this.wind);
     this.vrm.update(delta);
 
     if (!this.footContactShadow) {
@@ -1078,17 +1051,17 @@ export class StageAvatar {
       this.vrm,
       this.vrm.scene.visible && this.opacity > 0.2,
       this.vrm.scene.position.y,
-      this.wetnessTarget > 0
+      this.raining
     );
 
-    // 4.4 スカートの布（姿勢が決まってから。濡れた服は重いので風に揺らさない）
+    // 4.4 スカートの布（姿勢が決まってから）
     if (this.skirtClothEnabled) {
       if (this.clothResetPending) {
         this.clothResetPending = false;
         this.skirtCloth?.settle();
         for (const cloth of this.otherCloths) cloth.settle();
       } else {
-        const clothWind = this.wetnessTarget > 0 ? null : this.clothWind();
+        const clothWind = this.clothWind();
         this.skirtCloth?.update(delta, clothWind);
         for (const cloth of this.otherCloths) cloth.update(delta, clothWind);
       }
@@ -1184,8 +1157,6 @@ export class StageAvatar {
     this.heldItem = null;
     this.effects?.dispose();
     this.effects = null;
-    this.wetDrips?.dispose();
-    this.wetDrips = null;
     this.skirtCloth?.dispose();
     this.skirtCloth = null;
     for (const cloth of this.otherCloths) cloth.dispose();

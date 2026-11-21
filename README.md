@@ -63,7 +63,7 @@ stage.setCameraShot('wide', 'aoi');
 - 計算は CPU で、ソルバーだけなら 1 人あたり 1 フレーム 3〜5ms です（`aoi-school.vrm`、布 1097 点）。PC の負荷が高いと描画ループの中で 12〜14ms かかり、60fps を割ることがありました。
 - 椅子や床は当たり判定にありません。座ると、布は太ももの上に乗りますが、後ろの裾は座面を通り抜けて垂れます。
 - カットや立ち位置の変更で腰が 1 フレームに 40cm 以上動く・1 ラジアン以上回ると、布を今の姿勢へ置き直します。
-- 場所の風（`wind`）は布にも効きます（強さ 0.1 を 2m/s として扱います）。濡れている間は風に揺らしません。
+- 場所の風（`wind`）は布にも効きます（強さ 0.1 を 2m/s として扱います）。
 
 例：`npm run example` で http://localhost:5192/?cloth=1 を開きます。
 
@@ -87,7 +87,6 @@ configureAssets({
 
 - 3D の背景：`registerEnvironment(name, { load, dispose })`（`src/stage/environments.ts`）。場所の `environment.model` に `builtin:<name>` と書くと使われます。
 - 手に持つ小物：`registerHeldItem(id, spec)`（`src/avatar/heldItem.ts`）。
-- 雨で濡れた服の絵柄：`registerWetTexture(pattern, url)`（`src/shader/WetCloth.ts`）。マテリアル名が `pattern` に合う服に使われます。
 
 ## 口の動き
 

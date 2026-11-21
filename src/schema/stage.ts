@@ -253,8 +253,6 @@ export interface StageCastMember {
   look?: AvatarLook;
   /** 日なたの明るさ（窓の外の人物など） */
   daylight?: number;
-  /** 雨で濡れた具合（0〜1） */
-  wet?: number;
   /** 手に持つ小物（hand を省略したら小物ごとの既定の手） */
   heldItem?: { item: string; hand?: 'left' | 'right' };
 }

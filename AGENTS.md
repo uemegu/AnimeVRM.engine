@@ -12,7 +12,7 @@ AI のコーディングエージェントが作業前に読む説明書。パ�
 | `src/shader/` | キャラの MToon シェーダーへ差し込む部品（`inject*` 関数）と、髪の深度・レイヤー深度の描画 |
 | `src/ToonShader.ts` | `applyToonShader(vrm, scene, options)`。MToon の材質を分類（肌・髪・服）し、`onBeforeCompile` で差し込む。戻り値 `ToonShaderController` |
 | `src/effects/` | 感情の演出（顔に重ねる絵・涙・汗・文字演出・集中線・雨・光線・霧・速い動きの残像） |
-| `src/avatar/` | キャラの体まわり（手の当たり、布のへこみ、風、持ち物、話すときの顔、足元の影、濡れの滴、表情の追加） |
+| `src/avatar/` | キャラの体まわり（手の当たり、布のへこみ、風、持ち物、話すときの顔、足元の影、表情の追加） |
 | `src/cloth/` | 布のシミュレーション。three 以外に依存せず単独で使える（`src/cloth/README.md`、入口 `src/cloth/index.ts`）。舞台からは `StageAvatar.setSkirtCloth` |
 | `src/scene/` | 空（`SkyBackground.ts`）、3D背景のセル調の明暗（`celShading.ts`）、小物の影の目印（`castShadows.ts`）、日なたの足し込み（`Daylight.ts`） |
 | `src/schema/` | zod のスキーマ。`visual.ts`（時間帯・場所）、`stage.ts`（キャラ・カメラ・演出・カット状態） |
@@ -119,8 +119,6 @@ AI のコーディングエージェントが作業前に読む説明書。パ�
 | 天使の輪 | `src/shader/HairRing.ts` | 時間帯 `lighting.hairRingTint`、コード内 `DEFAULT_HAIR_RING_PARAMS` |
 | 頭頂の毛束の影をならす | `src/shader/HairCrown.ts` | コード内 `HAIR_CROWN_UNIFORMS` |
 | 外形だけの日差しのリム | `src/shader/SilhouetteRim.ts` | 主光の向きと強さから自動（`updateSilhouetteRimLight`） |
-| 濡れた服 | `src/shader/WetCloth.ts`（絵柄は `registerWetTexture`） | キャスト `wet` |
-| 濡れの滴 | `src/avatar/wetDrips.ts` | キャスト `wet` |
 | 日なたの明るさ | `src/scene/Daylight.ts` | キャスト `daylight` |
 | 頬染め・赤面・怒り・顔の汗 | `src/effects/FaceOverlayEffect.ts`（赤面は瞳も縮める：`eye/IrisShrinkEffect.ts`） | キャスト `look`、カット状態（`blush`、`redface`、`anger`） |
 | 涙目・あわあわ口・涙 | `src/effects/eye/WateryEyeEffect.ts`、`cry/CryFaceEffect.ts`、`tears/TearEffect.ts` | キャスト `look`、カット状態（`tearyEyes`、`awawaMouth`、`tears`） |
@@ -182,11 +180,11 @@ AI のコーディングエージェントが作業前に読む説明書。パ�
 
 ### キャラのシェーダーを変える
 
-- `src/ToonShader.ts` の `applyToonShader` が、MToon の材質ごとに `material.onBeforeCompile` を重ね、`shader.fragmentShader.replace('<three-vrm のシェーダーの一節>', ...)` で書き換える。部品は `src/shader/` の `injectHairShadow` / `injectHairRing` / `injectHairCrown` / `injectFaceSdf` / `injectWetCloth`。
+- `src/ToonShader.ts` の `applyToonShader` が、MToon の材質ごとに `material.onBeforeCompile` を重ね、`shader.fragmentShader.replace('<three-vrm のシェーダーの一節>', ...)` で書き換える。部品は `src/shader/` の `injectHairShadow` / `injectHairRing` / `injectHairCrown` / `injectFaceSdf`。
 - 置換元の文字列（例 `'shading *= shadow;'`、`'mix( material.shadeColor, material.diffuseColor, shading )'`、`'gl_FragColor = vec4( col, diffuseColor.a );'`）が three-vrm 側のシェーダーと1文字でも違うと、`replace` は何もせず、エラーも出ないまま効かない。three-vrm を上げたとき・新しい置換を書いたときは、置換後の文字列が入ったかを確かめる（`node_modules/@pixiv/three-vrm` の MToon のシェーダーと突き合わせる）。
 - 輪郭線は別の材質（`material.isOutline`）だが同じフラグメントシェーダーを `OUTLINE` 定義つきで通る。輪郭線だけ・本体だけの処理は `#if defined( OUTLINE )` / `#if !defined( OUTLINE )` で分ける。輪郭線は法線が裏返っているので、拡散光は「その画素の影色 × 光の色」になる（色トレスはこれを使っている）。
 - 輪郭線の頂点側（太さの強弱、奥へのずらし `OUTLINE_DEPTH_OFFSET`）は `material.isOutline` のときだけ重ねる別の `onBeforeCompile`。
-- uniform は `material.userData` か共有オブジェクト（`HAIR_RING_UNIFORMS`、`SILHOUETTE_RIM_UNIFORMS` など）に置き、`onBeforeCompile` の中で `shader.uniforms` へつなぐ。値の更新は `ToonShaderController`（`updateMaterialStyle`、`updateOutline`、`setWetness` など）から行う。
+- uniform は `material.userData` か共有オブジェクト（`HAIR_RING_UNIFORMS`、`SILHOUETTE_RIM_UNIFORMS` など）に置き、`onBeforeCompile` の中で `shader.uniforms` へつなぐ。値の更新は `ToonShaderController`（`updateMaterialStyle`、`updateOutline` など）から行う。
 - 材質の分類は名前の正規表現（`DEFAULT_BODY_PATTERN`、`DEFAULT_HAIR_PATTERN`、`DEFAULT_CLOTH_PATTERN`、`isEyeMaterial`）。VRoid の命名を前提にしている。
 - 輪郭線・人物マスク・髪の深度は同じ材質やジオメトリで描くので、頂点を動かす変更はそれらにも効く。
 
@@ -217,7 +215,7 @@ engine 単体ではなく、親リポジトリのルートで実行する。
 - カットの `effects` は前のカットから引き継がれる（親の `packages/scenario/src/stage.ts` の `mergeStageState`：`{ ...prev.effects, ...scene.effects }`）。止めるには明示的に off / false / 0 を書く。`timeOfDay`、`rain`、流れる背景も同じく引き継ぐ。
 - 場面転換（`screenTransition`）のような一瞬の演出は `npm run shot` に写らない。
 - 入・切の比較は、同じ設定で2回撮った差（撮るたびの揺れ）を先に測ってから判断する。
-- engine には作品固有の中身（特定のキャラ・場所・背景セット）を入れない。3D背景セットは親の `packages/content/src/sets.ts` の `registerSets` が `registerEnvironment(name, { load, dispose })`（`src/stage/environments.ts`）で登録する。小物は `packages/content/src/props.ts`（`registerHeldItem`）、濡れた服の絵柄は `packages/content/src/wet.ts`（`registerWetTexture`）。入口は `packages/content/src/register.ts`。
+- engine には作品固有の中身（特定のキャラ・場所・背景セット）を入れない。3D背景セットは親の `packages/content/src/sets.ts` の `registerSets` が `registerEnvironment(name, { load, dispose })`（`src/stage/environments.ts`）で登録する。小物は `packages/content/src/props.ts`（`registerHeldItem`）。入口は `packages/content/src/register.ts`。
 - 3D背景との約束は `userData` だけ：`setEffects(effects)`、`configureEnvironment(placement)`（`placeEnvironment` が呼ぶ）、`setSky`（付いた子は非表示にされ、空は `SkyBackground` が描く）。背景が人物の逆光リムを出すときは `scene.userData.characterRim`。
 - 作業ツリーには別の作業の変更が同時に入っていることがある。`git stash` や `git checkout -- <file>` で他人の変更を巻き込まない。
 - 親のテストには、2026-11-15 時点で `packages/scenario` に失敗が3件ある（`assets/scenarios/.DS_Store` を読もうとする、`locations.json` にない場所 `painted_gym` を参照する、カット状態の期待値に `beams` がない）。新しい失敗かどうかは変更前の状態と比べて判断する。
