@@ -20,15 +20,29 @@ import { forEachVertex, mainBone, skinPart } from './handShape';
 
 export type CheekPinchSide = 'left' | 'right' | 'both';
 
-/** 手を頬へ運ぶ時間・戻す時間（秒） */
-const REACH_TIME = 0.5;
-const RETURN_TIME = 0.45;
+/** 手を頬へ運ぶ時間・戻す時間（秒）。手を口元へ運ぶ動作の移送は 1 秒前後（飲む・食べる動作の計測）。頬は口より近いので少し短く */
+const REACH_TIME = 0.7;
+const RETURN_TIME = 0.6;
+/** 指をつまむ形にするのは、手を運ぶ途中のこの割合から（手が顔に近づいてから指を合わせる） */
+const FINGER_FROM = 0.45;
+/** 手首の向きを合わせ始める割合 */
+const HAND_FROM = 0.3;
+/** 手首のひねりのうち前腕へ移す割合 */
+const TWIST_TO_FOREARM = 1;
+/** 頬をつまむときの指の向き（上・後ろ・内の割合） */
+const FINGER_UP = 0.75;
+const FINGER_BACK = 0.35;
+const FINGER_IN = 0.15;
+/** 手首を運ぶ経由点：頬に着く位置から下・前・内へずらす量（m） */
+const VIA_BELOW = 0.12;
+const VIA_FORWARD = 0.1;
+const VIA_IN = 0.03;
+/** 頬に着いたときの肘の向き（下を 1 とした前・外の割合） */
+const ELBOW_FORWARD = 1.2;
+const ELBOW_OUT = 0.1;
 /** 指が頬に着いてから引ききるまでの時間と、離して頬が戻るまでの時間（秒） */
 const PULL_TIME = 0.35;
 const RELEASE_TIME = 0.15;
-/** 手を運ぶ途中に、体の前・外へふくらませる量（m。まっすぐ運ぶと前腕が胴に埋まる） */
-const ARC_FORWARD = 0.12;
-const ARC_OUT = 0.06;
 /** 人差し指の曲げ（付け根・中・先、度）と、握る指の曲げ */
 const INDEX_CURL = [30, 45, 25];
 const FIST_CURL = [75, 95, 60];
@@ -260,19 +274,21 @@ export class CheekPinch {
       if (w <= 1e-4) continue;
 
       root.updateWorldMatrix(true, true);
-      // 指の形
+      // 指の形（手が顔に近づいてから合わせる）
+      const fingerWeight = THREE.MathUtils.smoothstep(w, FINGER_FROM, 1);
       for (const { bone, pose } of hand.fingers) {
         this.keep(bone);
-        bone.quaternion.slerp(pose, w);
+        bone.quaternion.slerp(pose, fingerWeight);
       }
       // 手の向き（正規化ボーンの根のローカルで決める）
       const rootQ = root.getWorldQuaternion(_q);
       const sign = hand.side === 'left' ? 1 : -1;
       const { left, up, forward } = this.frame;
       const outward = _a.copy(left).multiplyScalar(sign);
-      // 指は頬の横から内・少し後ろへ、手のひらは前へ（親指が下、人差し指が上に来て、頬を上下からはさむ）
-      const finger = new THREE.Vector3().addScaledVector(up, 0.15).addScaledVector(forward, -0.35).addScaledVector(outward, -0.85).normalize();
-      const palm = forward.clone();
+      // 指は前腕の延長で上・少し後ろ・内へ、手のひらは顔の方（内側）へ。手首をほぼまっすぐのまま、
+      // 親指と人差し指で頬を前後からはさむ（手のひらを前へ向けると、手首を大きく反らせて指を後ろへ曲げる形になる）
+      const finger = new THREE.Vector3().addScaledVector(up, FINGER_UP).addScaledVector(forward, -FINGER_BACK).addScaledVector(outward, -FINGER_IN).normalize();
+      const palm = outward.clone().negate();
       palm.addScaledVector(finger, -palm.dot(finger)).normalize();
       _m.makeBasis(hand.fingerRest, hand.palmRest, _b.crossVectors(hand.fingerRest, hand.palmRest));
       _m2.makeBasis(finger, palm, _c.crossVectors(finger, palm));
@@ -284,17 +300,33 @@ export class CheekPinch {
       const goal = hand.pointLocal.clone().addScaledVector(hand.pullLocal, pull).applyMatrix4(this.head.matrixWorld);
       const offset = hand.pinchLocal.clone().multiply(hand.hand.getWorldScale(_b)).applyQuaternion(wantWorld);
       const wristGoal = goal.clone().sub(offset);
-      const wrist = hand.hand.getWorldPosition(new THREE.Vector3()).lerp(wristGoal, w);
-      const arc = Math.sin(Math.PI * w);
-      wrist.add(_b.copy(forward).multiplyScalar(ARC_FORWARD * arc).addScaledVector(outward, ARC_OUT * arc).applyQuaternion(rootQ));
-      // 肘は下・外・少し前へ
-      const pole = new THREE.Vector3().addScaledVector(up, -1).addScaledVector(forward, 0.5).addScaledVector(outward, 0.35).applyQuaternion(rootQ).normalize();
-      this.keep(hand.upper);
-      this.keep(hand.lower);
-      this.keep(hand.hand);
+      const arm = [hand.upper, hand.lower, hand.hand];
+      arm.forEach((bone) => this.keep(bone));
+      // 手首は「今の位置 → 胸の前・頬の少し下 → 頬」の曲線で運ぶ（体の前を上がり、頬へは下から寄せる）。
+      // 直線で運ぶと前腕が胴に埋まり、関節の回転を混ぜると肩の回転の経路で手が顔より上へ行き過ぎる
+      const start = hand.hand.getWorldPosition(new THREE.Vector3());
+      // 経由点：頬に着く位置から下・前・内へずらした所（ずらす向きは体の根の向きで）
+      const via = new THREE.Vector3()
+        .addScaledVector(up, -VIA_BELOW)
+        .addScaledVector(forward, VIA_FORWARD)
+        .addScaledVector(outward, -VIA_IN)
+        .applyQuaternion(rootQ)
+        .add(wristGoal);
+      const u = w;
+      const wrist = start.clone().multiplyScalar((1 - u) * (1 - u)).addScaledVector(via, 2 * (1 - u) * u).addScaledVector(wristGoal, u * u);
+      // 肘の向き：モーションの肘の向きから、頬に着いたときの向き（下・前）へ
+      const shoulderPos = hand.upper.getWorldPosition(new THREE.Vector3());
+      const elbowPos = hand.lower.getWorldPosition(new THREE.Vector3());
+      const startBend = elbowPos.sub(shoulderPos).normalize();
+      const endBend = new THREE.Vector3().addScaledVector(up, -1).addScaledVector(forward, ELBOW_FORWARD).addScaledVector(outward, ELBOW_OUT).applyQuaternion(rootQ).normalize();
+      const pole = startBend.lerp(endBend, THREE.MathUtils.smoothstep(w, 0, 0.8)).normalize();
+      const handFrom = hand.hand.getWorldQuaternion(new THREE.Quaternion());
       reachWithPole(hand.upper, hand.lower, hand.hand, wrist, pole);
-      const current = hand.hand.getWorldQuaternion(new THREE.Quaternion()).slerp(wantWorld, w);
-      hand.hand.quaternion.copy(hand.hand.parent!.getWorldQuaternion(_q2).invert().multiply(current));
+      // 手首の向き：運ぶ途中はモーションの向きのまま（前腕に連れて動く）、顔に近づいてから頬をつまむ向きへ
+      const handWorld = handFrom.slerp(wantWorld, THREE.MathUtils.smoothstep(w, HAND_FROM, 1));
+      hand.hand.quaternion.copy(hand.hand.parent!.getWorldQuaternion(_q2).invert().multiply(handWorld));
+      // 前腕の長さ方向まわりのひねり（回内・回外）は、手首ではなく前腕で受ける（手首の骨で受けると肌が絞られる）
+      moveTwistToForearm(hand.lower, hand.hand, TWIST_TO_FOREARM);
       hand.upper.updateMatrixWorld(true);
     }
   }
@@ -304,8 +336,25 @@ export class CheekPinch {
   }
 }
 
+/**
+ * 手の骨のローカル回転のうち、前腕の長さ方向まわりのひねりを、fraction の割合だけ前腕の骨へ移す。
+ * 前腕の骨を自分の長さ方向に回しても手首の位置は動かず、手の向き（ワールド）も変わらない
+ */
+function moveTwistToForearm(lower: THREE.Object3D, hand: THREE.Object3D, fraction: number): void {
+  const axis = hand.position.clone().normalize();
+  const q = hand.quaternion;
+  const along = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+  const twist = new THREE.Quaternion(axis.x * along, axis.y * along, axis.z * along, q.w);
+  if (twist.lengthSq() < 1e-12) return;
+  twist.normalize();
+  const moved = new THREE.Quaternion().slerp(twist, fraction);
+  lower.quaternion.multiply(moved);
+  hand.quaternion.premultiply(moved.invert());
+  lower.updateMatrixWorld(true);
+}
+
 /** 2ボーン IK（肘の向きを pole で決める） */
-function reachWithPole(upper: THREE.Object3D, lower: THREE.Object3D, hand: THREE.Object3D, target: THREE.Vector3, pole: THREE.Vector3): void {
+export function reachWithPole(upper: THREE.Object3D, lower: THREE.Object3D, hand: THREE.Object3D, target: THREE.Vector3, pole: THREE.Vector3): void {
   const shoulder = upper.getWorldPosition(new THREE.Vector3());
   const elbow = lower.getWorldPosition(new THREE.Vector3());
   const wrist = hand.getWorldPosition(new THREE.Vector3());
