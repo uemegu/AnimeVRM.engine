@@ -19,6 +19,8 @@ import { measureHand, skinPart } from '../avatar/handShape';
 import type { ClothHandCapsule } from '../cloth/SkinnedCloth';
 import { SpringWind, type WindSettings } from '../avatar/springWind';
 import { createVrmGarments, type GarmentCloth, type GarmentSpec } from '../cloth/vrm';
+import { groundField } from '../cloth/ground';
+import type { GroundField } from '../cloth/solver';
 import { SkinnedCloth, type ClothWind } from '../cloth/SkinnedCloth';
 import { AvatarEffects } from './AvatarEffects';
 import { idleMotionUrl, resolveAssetUrl } from '../utils/path';
@@ -292,6 +294,10 @@ export interface StageAvatarOptions {
   /** 布にする服（材質名かメッシュ名 → 生地など。cloth/vrm.ts の GarmentSpec）。書いた服だけを布にする */
   garments?: Record<string, GarmentSpec>;
 }
+
+/** 布の地面を測り直す、腰の横の移動（m）。測る範囲は腰のまわり 1.6m 四方 */
+const GROUND_REBUILD_DISTANCE = 0.25;
+const _clothGroundV = new THREE.Vector3();
 
 export class StageAvatar {
   public id: string;
@@ -570,6 +576,56 @@ export class StageAvatar {
 
 
   /** 日なたの明るさ（暗い室内から見た窓の外の人物など。0 で場の光だけ） */
+  /** 布が乗る物（setGround） */
+  private groundObjects: THREE.Object3D[] = [];
+  private groundFloor = 0;
+  private groundVersion = 0;
+  private groundBuilt: { field: GroundField | null; x: number; z: number; top: number; version: number } | null = null;
+  /** 読み込み時の姿勢での、左右の足首の骨の、足の裏からの高さ（m。床の高さを足から見積もるのに使う） */
+  private soleOffset: [number, number] | null = null;
+  /** 布の地面を測った時間（ms、調べる用） */
+  public groundMs = 0;
+
+  /**
+   * スカートの布が乗る物。objects（3D 背景など）を腰のまわりで真上から測り、座面・ベッド・床に布を乗せる。floor は
+   * 床の高さ（ワールドの y）で、布はこれより下へ行かない（足がそれより下にあるときは足の裏まで）。null で床だけ
+   */
+  public setGround(objects: THREE.Object3D[] | null, floor = 0): void {
+    this.groundObjects = objects ?? [];
+    this.groundFloor = floor;
+    this.groundVersion++;
+  }
+
+  /** 布に地面を渡す。腰が測った範囲から出た・測った物が変わったら、測り直す */
+  private updateClothGround(): void {
+    const vrm = this.vrm;
+    const cloths = [this.skirtCloth, ...this.otherCloths].filter((c): c is SkinnedCloth => c instanceof SkinnedCloth);
+    if (!vrm || !cloths.length) return;
+    const humanoid = vrm.humanoid;
+    // 床：足が床より下にあれば（座った姿勢で体を下げたときなど）足の裏まで下げる
+    let floor = this.groundFloor;
+    if (this.soleOffset) {
+      (['leftFoot', 'rightFoot'] as const).forEach((name, k) => {
+        const foot = humanoid.getRawBoneNode(name);
+        if (foot) floor = Math.min(floor, foot.getWorldPosition(_clothGroundV).y - this.soleOffset![k]);
+      });
+    }
+    const hips = humanoid.getRawBoneNode('hips');
+    if (!hips) return;
+    hips.getWorldPosition(_clothGroundV);
+    const built = this.groundBuilt;
+    if (!built || built.version !== this.groundVersion || Math.hypot(_clothGroundV.x - built.x, _clothGroundV.z - built.z) > GROUND_REBUILD_DISTANCE || _clothGroundV.y + 0.3 > built.top) {
+      const t0 = performance.now();
+      const top = _clothGroundV.y + 0.5;
+      const field = this.groundObjects.length
+        ? groundField(this.groundObjects, { centre: { x: _clothGroundV.x, z: _clothGroundV.z }, top, bottom: floor - 0.3 })
+        : null;
+      this.groundBuilt = { field, x: _clothGroundV.x, z: _clothGroundV.z, top, version: this.groundVersion };
+      this.groundMs = performance.now() - t0;
+    }
+    for (const cloth of cloths) cloth.setGround(this.groundBuilt!.field, floor);
+  }
+
   /** 髪とスカートを揺らす風（場所の wind）。null で止む */
   public setWind(wind: WindSettings | null | undefined): void {
     this.wind = wind ?? null;
@@ -678,6 +734,13 @@ export class StageAvatar {
     // skirtCloth が null のままでも、作り直さない）
     if (this.clothsCreated) return;
     this.clothsCreated = true;
+    // 足の裏からの足首の高さ（読み込み時の姿勢は立っているので、体のいちばん低い所が足の裏）
+    {
+      vrm.scene.updateMatrixWorld(true);
+      const sole = new THREE.Box3().setFromObject(vrm.scene).min.y;
+      const offsets = (['leftFoot', 'rightFoot'] as const).map((name) => vrm.humanoid.getRawBoneNode(name)?.getWorldPosition(_clothGroundV).y);
+      this.soleOffset = offsets.every((y) => y !== undefined && Number.isFinite(sole)) ? [offsets[0]! - sole, offsets[1]! - sole] : null;
+    }
     const cloths = createVrmGarments(vrm, this.garments, { knit: StageAvatar.knitOptions });
     this.skirtCloth = (cloths.find((c) => c instanceof SkinnedCloth) as SkinnedCloth | undefined) ?? null;
     this.otherCloths = cloths.filter((c) => c !== this.skirtCloth);
@@ -1056,6 +1119,7 @@ export class StageAvatar {
 
     // 4.4 スカートの布（姿勢が決まってから）
     if (this.skirtClothEnabled) {
+      this.updateClothGround();
       if (this.clothResetPending) {
         this.clothResetPending = false;
         this.skirtCloth?.settle();

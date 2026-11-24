@@ -168,10 +168,26 @@ export interface ClothOptions {
   tetherSlack: number; margin: number; friction: number;
   air: number; drag: number; inflate: number; shield: number; gust: number; maxAero: number;
   damping: number; pinBelowTop: number; grabRadius: number; handMargin: number; handFriction: number;
+  groundMargin: number; groundFriction: number;
   sleep: boolean; quietAccel: number; quietSpeed: number; quietAir: number; calmAfter: number; sleepAfter: number; sleepSpeed: number;
   calmDamping: number; wakeDist: number; wakeAngle: number;
 }
 export interface ClothCollider { sdf: DistanceGrid; rest?: Float64Array }
+/**
+ * 布の下の、動かない面（床・椅子の座面・ベッドなど）を真上から測った高さの地図（ワールド座標、y が上）。
+ * 格子の 1 マスごとに、上から順に最大 `layers` 枚の面の高さを持つ（使わない所は -Infinity）。机の天板とその下の床のように、
+ * 上に物がある所も表せる。布の点は、自分の高さから band（solver の groundBand）より上にない面のうち、いちばん高い面の上に乗る
+ */
+export interface GroundField {
+  /** 格子の角（ワールドの x と z、m） */
+  x0: number; z0: number;
+  /** 1 マスの大きさ（m） */
+  cell: number;
+  nx: number; nz: number;
+  layers: number;
+  /** マス (i, j) の面の高さ：h[(j * nx + i) * layers + l]。l が小さいほど高い面 */
+  h: Float32Array;
+}
 export interface ClothInput {
   position: ArrayLike<number>;
   index: ArrayLike<number>;
@@ -224,6 +240,10 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     grabRadius: 0.03,
     // hands (setCapsules): how far out of the capsule the cloth is kept (m), and how much of its slide along the hand it loses
     handMargin: 0.003, handFriction: 0.6,   // 0.9: cloth blown against a hand hanging at the side wrapped round it and stayed on it
+    // ground (setGround): how far above a surface the points are kept (m); the friction coefficient against it (Coulomb, applied as in Macklin et al. 2014 "Unified Particle Physics": the slide is stopped
+    // while it is shorter than coefficient x the push, otherwise shortened by that much. 0.6: cotton on upholstery and wood
+    // measure about 0.5-0.7)
+    groundMargin: 0.004, groundFriction: 0.6,
     // ---- sleep: with nothing moving the cloth from outside, it is brought to rest and then not simulated at all ----
     // "Nothing from outside": the hips do not change speed (quietAccel), the body's pieces and the held points do not move
     // against the hips (quietSpeed), no wind, no pinch. After calmAfter seconds of that the damping grows (to calmDamping),
@@ -593,8 +613,88 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
     }
   }
 
+  // ---- ground: surfaces that do not move (setGround, world, y up): the floor, a chair's seat, a bed ----
+  // Three sources, the highest one under a point wins:
+  //   floor   a level plane (y), everything below it is solid
+  //   field   surfaces measured from above (GroundField): only those under the `ceiling` (the waist) count. Cloth hangs
+  //           from the waist, so it cannot have got under a surface lower than that (a seat), but it can be under a higher
+  //           one (the knees and the lap under a desk top). (Counting only the surfaces a little above each point left a
+  //           skirt put straight into a sitting pose through the seat: its back was already 10-20 cm under it.)
+  //   boxes   level rectangles (centre x, z, the angle of their first side, half lengths, top y), same rule as the field
+  //           (SkinnedCloth puts a seat under the thighs here when nothing measured holds a sitting body up)
+  // A point under its surface comes back to it straight up, unless it came in from the side (it was outside a substep ago,
+  // over a lower surface, at a height already under this one): then it goes back sideways to the edge, when that is the
+  // shorter way (cloth hanging down past the front of a seat is not lifted onto it). Tested before the body, which has
+  // the last word (cloth caught between the seat and the buttocks stays out of the body).
+  let gField: GroundField | null = null, gFloor = -Infinity, gCeil = Infinity, gBoxes = new Float64Array(0), gBoxN = 0, gOn = false, gFresh = false;
+  const BOX = 7;   // [cx, cz, cos, sin, half length along (cos, sin), half length across, top]
+  // points the ground pushed up in this substep. Pushed back down by the body after that, they are caught between the two
+  // (under the buttocks on a seat) and held there by friction from both sides: they do not slide sideways. Without this,
+  // the body's push out (down and forward under a thigh) and the seat's push up walked the caught cloth forward every
+  // substep, and a skirt sat on piled up into a wad in front of the seat
+  const gPushed = new Uint8Array(n);
+  function setGround(field: GroundField | null, floor = -Infinity, boxes: ArrayLike<number> | null = null, boxCount = 0, ceiling = Infinity): void {
+    if (field !== gField) gFresh = true;
+    gField = field; gFloor = floor; gCeil = ceiling;
+    gBoxN = boxes ? boxCount : 0;
+    if (gBoxes.length < gBoxN * BOX) gBoxes = new Float64Array(gBoxN * BOX);
+    for (let k = 0; k < gBoxN * BOX; k++) gBoxes[k] = boxes![k];
+    gOn = !!field || floor > -Infinity || gBoxN > 0;
+    if (!gOn) gPushed.fill(0);
+  }
+  // the surface cloth at (px, pz) rests on: the highest one under the ceiling (or under `below`, when given lower)
+  function surfaceAt(px: number, pz: number, below = Infinity): number {
+    let s = gFloor;
+    const top = Math.min(gCeil, below);
+    const f = gField;
+    if (f) {
+      const i = Math.floor((px - f.x0) / f.cell), j = Math.floor((pz - f.z0) / f.cell);
+      if (i >= 0 && j >= 0 && i < f.nx && j < f.nz) {
+        const b = (j * f.nx + i) * f.layers;
+        for (let l = 0; l < f.layers; l++) { const h = f.h[b + l]; if (h <= top) { if (h > s) s = h; break; } }   // highest first
+      }
+    }
+    for (let q = 0; q < gBoxN; q++) {
+      const c = q * BOX, t = gBoxes[c + 6];
+      if (t > top || t <= s) continue;
+      const dx = px - gBoxes[c], dz = pz - gBoxes[c + 1];
+      if (Math.abs(dx * gBoxes[c + 2] + dz * gBoxes[c + 3]) <= gBoxes[c + 4] && Math.abs(-dx * gBoxes[c + 3] + dz * gBoxes[c + 2]) <= gBoxes[c + 5]) s = t;
+    }
+    return s;
+  }
+  function solveGround(): void {
+    const m = o.groundMargin, mu = o.groundFriction;
+    gPushed.fill(0);
+    for (let i = 0; i < n; i++) {
+      if (!w[i]) continue;
+      const k = i * 3, px = x[k], py = x[k + 1], pz = x[k + 2];
+      const s = surfaceAt(px, pz) + m;
+      if (py >= s) continue;
+      const up = s - py;
+      // came in through a side: a substep ago it was clear of what was under it, at a height under this surface
+      const qx = xp[k], qy = xp[k + 1], qz = xp[k + 2];
+      if (qy < s && qy >= surfaceAt(qx, qz) + m && (qx !== px || qz !== pz)) {
+        // where along the way back it leaves this surface: halve the step 7 times
+        let lo = 0, hi = 1;
+        {
+          for (let it = 0; it < 7; it++) {
+            const t = (lo + hi) / 2;
+            if (surfaceAt(px + (qx - px) * t, pz + (qz - pz) * t) + m <= py) hi = t; else lo = t;
+          }
+          const side = Math.hypot(qx - px, qz - pz) * hi;
+          if (side < up) { x[k] = px + (qx - px) * hi; x[k + 2] = pz + (qz - pz) * hi; continue; }
+        }
+      }
+      x[k + 1] = s;
+      gPushed[i] = 1;
+      // friction against the still surface: the slide over it in this substep
+      const sx = x[k] - qx, sz = x[k + 2] - qz, sl = Math.hypot(sx, sz);
+      if (sl <= mu * up) { x[k] = qx; x[k + 2] = qz; } else if (sl > 0) { const r = (mu * up) / sl; x[k] -= sx * r; x[k + 2] -= sz * r; }
+    }
+  }
+
   const wind: number[] = [0, 0, 0];
-  const stats = { asleep: false, watch: { accel: 0, speed: 0, drift: 0, tilt: 0, air: 0 }, ms: 0, substepMs: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
+  const stats = { asleep: false, ground: 0, watch: { accel: 0, speed: 0, drift: 0, tilt: 0, air: 0 }, ms: 0, substepMs: 0, strain: 0, depth: 0, speed: 0, rebuilds: 0, through: 0, pairs: 0, over: 0, dev: 0, devMax: 0, flare: 1, worst: null as { rest: number; y: number; w: number[] } | null };
 
   function solve(C: Uint32Array, L: Float64Array, alpha: number): void {
     for (let q = 0; q < L.length; q++) {
@@ -834,6 +934,8 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
         rigidSpeeds(dt);
       }
     } else if (asleep) wake();
+    // a new ground (moved to another place, or the set came in): settle on it
+    if (gFresh) { if (asleep) wake(); quietT = 0; gFresh = false; }
     computeAero(dt);
     ref.motion.set(ref.prev, ref.M);
     for (const col of cols) col.motion.set(col.prev, col.M);
@@ -883,6 +985,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       }
       // hands, then the body (it has the last word)
       if (capsTouch) { capsAt(s / ns, capB); capsAt(a, capA); solveCapsules(); }
+      if (gOn) solveGround();
       // tether and body
       for (let i = 0; i < n; i++) {
         if (!w[i]) continue;
@@ -903,6 +1006,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
           gx /= gl; gy /= gl; gz /= gl;
           const push = col.margin[i] - sd;
           x[k] += gx * push; x[k + 1] += gy * push; x[k + 2] += gz * push;
+          if (gPushed[i] && gy < -0.2) { x[k] = xp[k]; x[k + 2] = xp[k + 2]; continue; }   // caught between the body and the ground
           // friction: lose part of the slide along the surface, measured against where the piece carried this spot from
           const l = col.last;
           const bx = l[0] * lx + l[1] * ly + l[2] * lz + l[3], by = l[4] * lx + l[5] * ly + l[6] * lz + l[7], bz = l[8] * lx + l[9] * ly + l[10] * lz + l[11];
@@ -986,6 +1090,10 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
       if (X0[k + 1] < hemY) { r0 += Math.hypot(X0[k] - pivot[0], X0[k + 2] - pivot[1]); r1 += Math.hypot(lx - pivot[0], lz - pivot[1]); nh++; }
     }
     stats.dev = dev / n; stats.devMax = devMax; stats.flare = r1 / r0;   // flare: hem radius against the rest shape's
+    // deepest point under the ground it rests on (m)
+    let under = 0;
+    if (gOn) for (let i = 0; i < n; i++) if (w[i]) { const k = i * 3; under = Math.max(under, surfaceAt(x[k], x[k + 2]) - x[k + 1]); }
+    stats.ground = under;
     stats.strain = strain; stats.depth = depth; stats.speed = speed;
     return stats;
   }
@@ -1043,7 +1151,7 @@ export function createCloth({ position, index, sdf = null, colliders = null, piv
 
   return { o, n, nF, F, x, v, w, X0, nrm, map, body, bodyPrev, frames, snapFrames, fitRestToGravity, tPin,
     get sleeping() { return asleep; },
-    get driven() { return driven; }, set driven(d) { driven = d; }, restGap, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, setCapsules, pinned, rimLow, pinY, topY, botY, hemY,
+    get driven() { return driven; }, set driven(d) { driven = d; }, restGap, wind, stats, step, measure, reset, write, startGrab, moveGrab, endGrab, setCapsules, setGround, surfaceAt, pinned, rimLow, pinY, topY, botY, hemY,
     solveHinges: hinges, CD, TH, mass, fabric,
     knock,
     get grabbing() { return !!grab; },

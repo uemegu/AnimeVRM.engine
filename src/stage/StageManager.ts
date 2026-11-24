@@ -1063,6 +1063,15 @@ export class StageManager {
     this.environment?.object?.userData.setEffects?.(this.effects);
   }
 
+  /**
+   * スカートの布が乗る物を渡す：3D背景（椅子・ベッド・床）と、床の高さ（y = 0）。3D背景のない場所は床だけで、
+   * 座った体の下には布の側が仮の座面を置く（cloth/SkinnedCloth.ts の seatWhenUnsupported）
+   */
+  private applyClothGround(only?: StageAvatar): void {
+    const objects = this.environment?.object ? [this.environment.object] : null;
+    for (const avatar of only ? [only] : this.loadedAvatars.values()) avatar.setGround(objects, 0);
+  }
+
   /** 3D背景を読み込んで置く（同じモデルなら置き直すだけ）。置き終わったら解決する */
   private applyEnvironment(): Promise<void> {
     const settings = this.presets.locations[this.currentLocationId]?.environment;
@@ -1074,11 +1083,13 @@ export class StageManager {
       }
       this.environment = null;
     }
+    this.applyClothGround();
     if (!settings) return Promise.resolve();
     if (this.environment) {
       if (this.environment.object) {
         placeEnvironment(this.environment.object, settings);
         this.bakeStaticShadow();
+        this.applyClothGround();
       }
       return this.environment.ready;
     }
@@ -1101,6 +1112,7 @@ export class StageManager {
         this.scene.add(object);
         this.applyEffects();
         this.bakeStaticShadow();
+        this.applyClothGround();
       })
       .catch((err) => console.error(`3D背景を読み込めません: ${settings.model}`, err));
     return entry.ready;
@@ -1195,6 +1207,7 @@ export class StageManager {
     }
     avatar.setSkirtCloth(this.quality.skirtCloth);
     avatar.setClothSleep(this.quality.clothSleep);
+    this.applyClothGround(avatar);
 
     // 現在の時間帯マテリアル設定を初期反映
     const currentPreset = this.presets.timeOfDay[this.currentTimeOfDay] || this.presets.timeOfDay.day;

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { describePart, type ModelPart } from './parts';
 import { weld, capRims, buildSDF, type DistanceGrid } from './sdf';
-import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
+import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions, type GroundField } from './solver';
 import type { FabricSpec } from './fabric';
 import { ClothPose, clothSubsteps, MAX_CLOTH_FRAME } from './timing';
 
@@ -113,6 +113,18 @@ const DRAPE_TIME = 0.4;
 /** 体の三角形を当たり判定の部品に入れる重みの割合。これ以上の重みがある部品のすべてに入れる（関節をまたぐ三角形は両側へ） */
 const JOINT_SHARE = 0.25;
 const _up = new THREE.Vector3(0, 1, 0);
+/**
+ * 仮の座面（setGround で測った物が座った体を支えていないとき）。太ももの下の肌から、布の分（体の余白・地面の余白・
+ * 布の厚み）だけ下げた所に置く（m）
+ */
+const SEAT_GAP = 0.014;
+/** 測った面がこれより下なら、体を支えていないとみなす（m）。座面に置いた体が少し浮いている分は許す */
+const SEAT_SUPPORT = 0.06;
+/** 仮の座面の広さ：腰の関節から後ろへ（m）、太ももの長さの何割まで前へ、太ももの外へ（m） */
+const SEAT_BACK = 0.15, SEAT_FRONT = 0.8, SEAT_SIDE = 0.1;
+/** これより上の面は、布が下にあってよい（腰の骨からの高さ、m） */
+const GROUND_CEILING = 0.05;
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _f = new THREE.Vector3(), _mid = new THREE.Vector3();
 
 /** 布を押しのける手の一部（線分と太さ）。start・end は bone のローカル座標 */
 export interface ClothHandCapsule {
@@ -254,6 +266,29 @@ export class SkinnedCloth {
       }
     }
 
+    // ---- 太ももの太さ（仮の座面の高さに使う）：太ももの部品の頂点の、骨の線（股関節〜ひざ）からの距離の中央値 ----
+    const thighRadius: number[] = [];
+    for (const [thigh, knee] of options.legs ?? []) {
+      const q = pieces.findIndex((p) => p.bone === thigh), col = colliders[q];
+      if (q < 0 || !col) { thighRadius.length = 0; break; }
+      thigh.getWorldPosition(_a); knee.getWorldPosition(_b);
+      const ab = _b.clone().sub(_a), len2 = ab.lengthSq(), dist: number[] = [];
+      for (const bodyMesh of options.colliders?.meshes ?? []) {
+        if (bodyMesh === mesh) continue;
+        const P = (measured?.get(bodyMesh) ?? describePart(bodyMesh, freeBones)).geometry.attributes.position.array;
+        for (let i = 0; i < P.length; i += 3) {
+          _v.set(P[i], P[i + 1], P[i + 2]).sub(_a);
+          const t = _v.dot(ab) / len2;
+          if (t < 0.15 || t > 0.6) continue;
+          const d = _v.addScaledVector(ab, -t).length();
+          if (d < 0.15) dist.push(d);
+        }
+      }
+      if (dist.length < 20) { thighRadius.length = 0; break; }
+      dist.sort((x, y) => x - y);
+      thighRadius.push(dist[dist.length >> 1]);
+    }
+
     // ---- 布のメッシュを細かく分割する。リグの重みと変形前の位置は、新しい頂点へ引き継ぐ ----
     const g0 = sk.geometry;
     const free0 = sk.free;
@@ -345,6 +380,7 @@ export class SkinnedCloth {
       pieces: pieces.map((p) => ({ bone: p.bone.name, triangles: p.triangles, grid: p.grid })),
     });
     made.legs = options.legs ?? null;
+    if (thighRadius.length === 2) made.thighRadius = thighRadius as [number, number];
     return made;
   }
 
@@ -470,6 +506,69 @@ export class SkinnedCloth {
     return t * t * (3 - 2 * t);
   }
 
+  /** 左右の太ももの太さ（m、作った時に測る。測れなければ null で、仮の座面を置かない） */
+  private thighRadius: [number, number] | null = null;
+  private groundField: GroundField | null = null;
+  private groundFloor = -Infinity;
+  private groundSet = false;
+  private readonly seatBox = new Float64Array(7);
+  /**
+   * 座った体を支える物がないとき（座面を測れない絵の背景など）、太ももの下に仮の座面を置くか（legs と太ももの太さが
+   * 分かるときだけ効く）。両方の太ももが上がって（raised が 0.5 を超えて）いて、測った面がその下 6cm より低いときに置く
+   */
+  public seatWhenUnsupported = true;
+  /** 今置いている仮の座面（調べる用。中心・前の向き・前後と左右の半分の長さ・高さ。置いていなければ null） */
+  public seat: { centre: THREE.Vector3; forward: THREE.Vector3; halfLength: number; halfWidth: number; top: number } | null = null;
+
+  /**
+   * 布が乗る、動かない物。field は真上から測った面（ground.ts の groundField）、floor はこれより下へ行かない床の高さ
+   * （ワールドの y）。null と -Infinity で無し。毎フレーム呼んでよい（同じ field なら作り直さない）
+   */
+  setGround(field: GroundField | null, floor = -Infinity): void {
+    this.groundField = field;
+    this.groundFloor = floor;
+    this.groundSet = !!field || floor > -Infinity;
+    if (!this.groundSet) { this.seat = null; this.cloth.setGround(null); }
+  }
+
+  /** 地面をソルバーへ渡す。座った体を支える物がなければ、太ももの下に仮の座面を足す */
+  private applyGround(): void {
+    if (!this.groundSet) return;
+    const c = this.cloth;
+    // 布は腰から吊られているので、腰より低い面の下には入れない（机の天板のように腰より高い面の下には入れる）
+    const ceiling = this.hips.getWorldPosition(_a).y + GROUND_CEILING;
+    c.setGround(this.groundField, this.groundFloor, null, 0, ceiling);
+    this.seat = null;
+    const legs = this.legs, r = this.thighRadius;
+    if (!legs || !r || !this.seatWhenUnsupported || this.raised <= 0.5) return;
+    // 太ももの付け根の下の肌のいちばん低い所（骨の線から太さの分だけ下）
+    let lowest = Infinity;
+    _mid.set(0, 0, 0); _f.set(0, 0, 0);
+    const hipL = new THREE.Vector3(), hipR = new THREE.Vector3();
+    legs.forEach(([thigh, knee], k) => {
+      thigh.getWorldPosition(_a); knee.getWorldPosition(_b);
+      (k === 0 ? hipL : hipR).copy(_a);
+      // 座面に乗るのは尻と太ももの付け根（股関節から太ももの 3 割まで）。ひざが下がった座り方で、ひざの低さを拾わない
+      lowest = Math.min(lowest, _a.y + Math.min(0, 0.3 * (_b.y - _a.y)) - r[k]);
+      _mid.addScaledVector(_a, 0.3).addScaledVector(_b, 0.2);   // 両脚の、股関節から太ももの 4 割の所の平均
+      _f.add(_b.sub(_a));
+    });
+    const top = lowest - SEAT_GAP;
+    if (c.surfaceAt(_mid.x, _mid.z) >= top - SEAT_SUPPORT) return;   // 測った物が支えている
+    const thighLen = Math.hypot(_f.x, _f.z) / 2;
+    _f.y = 0;
+    if (_f.lengthSq() < 1e-8) return;
+    _f.normalize();
+    const hips = hipL.clone().add(hipR).multiplyScalar(0.5);
+    const back = -SEAT_BACK, front = SEAT_FRONT * thighLen;
+    const centre = hips.clone().addScaledVector(_f, (back + front) / 2);
+    const halfWidth = hipL.distanceTo(hipR) / 2 + Math.max(r[0], r[1]) + SEAT_SIDE, halfLength = (front - back) / 2;
+    const b = this.seatBox;
+    b[0] = centre.x; b[1] = centre.z; b[2] = _f.x; b[3] = _f.z; b[4] = halfLength; b[5] = halfWidth; b[6] = top;
+    c.setGround(this.groundField, this.groundFloor, b, 1, ceiling);
+    this.seat = { centre: centre.setY(top), forward: _f.clone(), halfLength, halfWidth, top };
+  }
+
   /** 外から動かすものがなく、布が止まって計算を休んでいるか（solver の sleep。cloth.o.sleep = false で止めない） */
   get sleeping(): boolean { return this.cloth.sleeping; }
 
@@ -528,6 +627,7 @@ export class SkinnedCloth {
       if (Math.abs(goal - this.raised) < 1e-3) this.raised = goal;
       this.cloth.o.shapeScale = 1 - this.raised;
     }
+    this.applyGround();
     this.cloth.o.substeps = clothSubsteps(dt, this.cloth.stats.substepMs);
     this.cloth.step(dt);
     this.write();

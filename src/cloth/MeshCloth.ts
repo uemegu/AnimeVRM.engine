@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { describePart } from './parts';
 import { weld, capRims, buildSDF } from './sdf';
-import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions } from './solver';
+import { subdivide, createCloth, type Cloth, type ClothCollider, type ClothOptions, type GroundField } from './solver';
 import type { FabricSpec } from './fabric';
 import type { ClothWind } from './SkinnedCloth';
 import { ClothPose, clothSubsteps, MAX_CLOTH_FRAME } from './timing';
@@ -266,6 +266,21 @@ export class MeshCloth {
     }
     this.cloth.reset(this.posed);
     this.write();
+  }
+
+  private groundGiven: GroundField | null = null;
+  private groundScaled: GroundField | null = null;
+  /**
+   * 布が乗る、動かない物（ワールド座標）。field は真上から測った面（ground.ts の groundField）、floor は床の高さ。
+   * null と -Infinity で無し。毎フレーム呼んでよい
+   */
+  setGround(field: GroundField | null, floor = -Infinity): void {
+    const s = this.scale;
+    if (field !== this.groundGiven) {
+      this.groundGiven = field;
+      this.groundScaled = field && { ...field, x0: field.x0 * s, z0: field.z0 * s, cell: field.cell * s, h: Float32Array.from(field.h, (y) => y * s) };
+    }
+    this.cloth.setGround(this.groundScaled, floor * s);
   }
 
   /** 1フレーム進める。モデルを動かした後に呼ぶ。wind は null で無風（速度は m/s） */
