@@ -143,6 +143,24 @@ export interface StageOptions {
 /** 口パクで口を開く大きさ（普通の声） */
 export const LIP_SYNC_GAIN = 0.7;
 
+/**
+ * from から to までの、重み（start から fade 秒かけて 0 から 1 へ直線で上がる）を掛けた経過時間。
+ * クロスフェードで混ざっていく歩きのモーションが、その間に進む距離を求めるのに使う
+ */
+function rampedTime(from: number, to: number, start: number, fade: number): number {
+  const weighted = (time: number) => {
+    if (time <= start) return 0;
+    if (fade <= 0) return time - start;
+    if (time < start + fade) return (time - start) ** 2 / (2 * fade);
+    return fade / 2 + (time - start - fade);
+  };
+  return Math.max(0, weighted(to) - weighted(from));
+}
+
+/** 決まった秒数で歩かせるときに変えてよい、歩くテンポ（再生速度）の幅 */
+const LOCOMOTION_RATE_MIN = 0.4;
+const LOCOMOTION_RATE_MAX = 2;
+
 export class StageManager {
   private canvas: HTMLCanvasElement;
   private presets: StagePresets;
@@ -303,7 +321,7 @@ export class StageManager {
   /** キャラごとに最後に当てた状態（差分だけ当てるため） */
   private appliedCut = new Map<string, string>();
   /** カットのタイムラインが指定した移動・退場（キャラ ID → 状態）。毎フレーム位置・透明度に反映する */
-  private cutMotion = new Map<string, Pick<CutAvatarState, 'move' | 'fadeOut' | 'mistOut'>>();
+  private cutMotion = new Map<string, Pick<CutAvatarState, 'move' | 'fadeOut' | 'mistOut' | 'motion' | 'motionAt'>>();
   /** 霧になって消えている最中のキャラ（キーの時刻で見分ける。写し取る前は effect が null） */
   private mists = new Map<string, { key: string; effect: MistDissolve | null }>();
   /** カットで撃った光線（指定の JSON で見分ける） */
@@ -1377,17 +1395,35 @@ export class StageManager {
     const member = this.castMembers.find((m) => m.id === id);
     const root = avatar.vrm?.scene;
     if (!member || !root) return;
-    const { move, fadeOut, mistOut } = this.cutMotion.get(id) ?? {};
+    const { move, fadeOut, mistOut, motion, motionAt } = this.cutMotion.get(id) ?? {};
     const base = this.resolvePosition(member);
     if (move) {
-      const t = THREE.MathUtils.clamp((this.cutTime - move.at) / move.duration, 0, 1);
+      // 歩き・走りのモーションなら、duration 秒で着く速さに合わせて歩くテンポ（再生速度）を変え、そのテンポで
+      // 接地した足が床を滑らない速さで進める（Unreal の Speed Planting・速度合わせと同じ考え方）。テンポを変えすぎると
+      // 不自然なので幅を付け、そのときは着く時刻の方をずらす（足は滑らせない）。それ以外は duration 秒で等速に動かす
+      const length = Math.hypot(move.to[0] - base[0], move.to[1] - base[1], move.to[2] - base[2]);
+      const groundSpeed = avatar.getGroundSpeed();
+      const elapsed = Math.max(0, this.cutTime - move.at);
+      let t: number;
+      if (groundSpeed > 0 && length > 1e-6) {
+        const rate = THREE.MathUtils.clamp(length / move.duration / groundSpeed, LOCOMOTION_RATE_MIN, LOCOMOTION_RATE_MAX);
+        // 止まった姿勢から歩き・走りへ切り替えたところは、つなぎ（クロスフェード）で足の動きが混ざっていく分だけ速さも上げていく
+        const fade = this.motionFadeIn(motion);
+        const walked = motionAt !== undefined && motionAt > move.at - fade ? rampedTime(move.at, this.cutTime, motionAt, fade) : elapsed;
+        t = Math.min(1, (groundSpeed * rate * walked) / length);
+        avatar.setLocomotionRate(this.cutTime >= move.at && t < 1 ? rate : null);
+      } else {
+        t = THREE.MathUtils.clamp(elapsed / move.duration, 0, 1);
+        avatar.setLocomotionRate(null);
+      }
       const x = base[0] + (move.to[0] - base[0]) * t;
       const y = base[1] + (move.to[1] - base[1]) * t;
       const z = base[2] + (move.to[2] - base[2]) * t;
       root.position.set(x, y, z);
-      if (t > 0) root.rotation.y = Math.atan2(move.to[0] - base[0], move.to[2] - base[2]);
+      if (this.cutTime > move.at) root.rotation.y = Math.atan2(move.to[0] - base[0], move.to[2] - base[2]);
       this.movedIds.add(id);
     } else if (this.movedIds.delete(id)) {
+      avatar.setLocomotionRate(null);
       root.position.set(...base);
       root.rotation.y = member.rotationY ?? -base[0] * 0.5;
     }
@@ -1791,7 +1827,7 @@ export class StageManager {
       const avatar = this.loadedAvatars.get(member.id);
       if (!avatar?.vrm || !this.castIds.includes(member.id)) continue;
       const key = state.avatars[member.id] ?? {};
-      this.cutMotion.set(member.id, { move: key.move, fadeOut: key.fadeOut, mistOut: key.mistOut });
+      this.cutMotion.set(member.id, { move: key.move, fadeOut: key.fadeOut, mistOut: key.mistOut, motion: key.motion, motionAt: key.motionAt });
       const look = member.look ?? DEFAULT_AVATAR_LOOK;
       const effective = {
         expression: key.expression ?? member.expression,

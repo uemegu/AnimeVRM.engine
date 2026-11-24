@@ -8,6 +8,7 @@ import { HairShadowUniforms } from '../shader/HairShadow';
 import { applySmoothNormalsToHierarchy } from '../shader/SmoothNormalHelper';
 import type { MaterialStyleParams, OutlineConfig } from './visual';
 import { getSeamlessLoopClip } from '../animation/seamlessLoop';
+import { measureGroundSpeed } from '../animation/groundSpeed';
 import { replaceHappyWithEyesOnly } from '../avatar/happyEyesOnly';
 import { EYES_CLOSED_EXPRESSIONS, registerShapeKeyExpressions } from '../avatar/shapeKeyExpressions';
 import { registerCheekShapes } from '../avatar/cheekShapes';
@@ -356,6 +357,10 @@ export class StageAvatar {
   private motionSpeed = 1;
 
   private currentAction: THREE.AnimationAction | null = null;
+  /** 今のモーションが地面を進む速さ（再生速度 1 のときの m/秒。歩き・走りでなければ 0） */
+  private currentGroundSpeed = 0;
+  /** 移動の間の歩くテンポ（setLocomotionRate）。null なら motionSpeed */
+  private locomotionRate: number | null = null;
   private currentAnimationUrl: string | null = null;
 
   // 表情クロスフェード管理
@@ -525,6 +530,7 @@ export class StageAvatar {
       this.mixer.stopAllAction();
       this.currentAction = null;
       this.currentAnimationUrl = null;
+      this.currentGroundSpeed = 0;
       this.applyRestPose();
       return null;
     }
@@ -549,7 +555,7 @@ export class StageAvatar {
       }
 
       action.reset();
-      action.timeScale = this.motionSpeed;
+      action.timeScale = this.locomotionRate ?? this.motionSpeed;
       if (this.currentAction && this.currentAction !== action) {
         action.crossFadeFrom(this.currentAction, crossFadeDuration, false);
       }
@@ -557,6 +563,7 @@ export class StageAvatar {
       action.play();
       this.currentAction = action;
       this.currentAnimationUrl = url;
+      this.currentGroundSpeed = measureGroundSpeed(sourceClip, this.vrm);
       return action;
     } catch (err) {
       console.error(`Failed to play animation ${url}:`, err);
@@ -810,9 +817,27 @@ export class StageAvatar {
     this.clothResetPending = this.skirtClothEnabled;
   }
 
+  /**
+   * 今のモーションを再生速度 1 で再生したとき、接地した足が床を滑らない移動の速さ（m/秒）。
+   * 歩き・走りのようにその場で足を運ぶモーションでなければ 0
+   */
+  public getGroundSpeed(): number {
+    return this.currentGroundSpeed;
+  }
+
+  /**
+   * 移動の間だけ、歩くテンポ（再生速度）を motionSpeed の代わりにこの値にする（null で motionSpeed に戻す）。
+   * 決まった秒数で決まった所まで歩かせるとき、歩幅に合った速さになるよう足の運びを速める・遅くする
+   */
+  public setLocomotionRate(rate: number | null): void {
+    if (this.locomotionRate === rate) return;
+    this.locomotionRate = rate;
+    if (this.currentAction) this.currentAction.timeScale = rate ?? this.motionSpeed;
+  }
+
   public setMotionSpeed(speed: number): void {
     this.motionSpeed = speed;
-    if (this.currentAction) this.currentAction.timeScale = speed;
+    if (this.currentAction) this.currentAction.timeScale = this.locomotionRate ?? speed;
   }
 
   public getMotionSpeed(): number {
