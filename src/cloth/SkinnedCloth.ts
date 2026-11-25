@@ -120,6 +120,8 @@ const _up = new THREE.Vector3(0, 1, 0);
 const SEAT_GAP = 0.014;
 /** 測った面がこれより下なら、体を支えていないとみなす（m）。座面に置いた体が少し浮いている分は許す */
 const SEAT_SUPPORT = 0.06;
+/** 床からこれより高い面が太ももの下にあれば、座る物があるとみなして仮の座面を置かない（m） */
+const SEAT_OBJECT = 0.1;
 /** 仮の座面の広さ：腰の関節から後ろへ（m）、太ももの長さの何割まで前へ、太ももの外へ（m） */
 const SEAT_BACK = 0.15, SEAT_FRONT = 0.8, SEAT_SIDE = 0.1;
 /** これより上の面は、布が下にあってよい（腰の骨からの高さ、m） */
@@ -514,7 +516,7 @@ export class SkinnedCloth {
   private readonly seatBox = new Float64Array(7);
   /**
    * 座った体を支える物がないとき（座面を測れない絵の背景など）、太ももの下に仮の座面を置くか（legs と太ももの太さが
-   * 分かるときだけ効く）。両方の太ももが上がって（raised が 0.5 を超えて）いて、測った面がその下 6cm より低いときに置く
+   * 分かるときだけ効く）。両方の太ももが上がって（raised が 0.5 を超えて）いて、測った面がその下 6cm より低く、太ももの下に床しかないときに置く
    */
   public seatWhenUnsupported = true;
   /** 今置いている仮の座面（調べる用。中心・前の向き・前後と左右の半分の長さ・高さ。置いていなければ null） */
@@ -563,6 +565,15 @@ export class SkinnedCloth {
     const back = -SEAT_BACK, front = SEAT_FRONT * thighLen;
     const centre = hips.clone().addScaledVector(_f, (back + front) / 2);
     const halfWidth = hipL.distanceTo(hipR) / 2 + Math.max(r[0], r[1]) + SEAT_SIDE, halfLength = (front - back) / 2;
+    // 仮の座面を置く範囲に床より上の物（椅子の座面など）があれば、体はその上へ座りに降りる途中。仮の座面を置くと、
+    // 太ももが上がりきる途中で宙に現れて裾を一気に押し上げ、本物の座面に近づいた所で消えてまた跳ぶ
+    const across = new THREE.Vector3(-_f.z, 0, _f.x);
+    for (let u = 0; u <= 4; u++) {
+      for (let v = -1; v <= 1; v++) {
+        _a.copy(centre).addScaledVector(_f, (u / 4 - 0.5) * 2 * halfLength).addScaledVector(across, v * halfWidth);
+        if (c.surfaceAt(_a.x, _a.z) > this.groundFloor + SEAT_OBJECT) return;
+      }
+    }
     const b = this.seatBox;
     b[0] = centre.x; b[1] = centre.z; b[2] = _f.x; b[3] = _f.z; b[4] = halfLength; b[5] = halfWidth; b[6] = top;
     c.setGround(this.groundField, this.groundFloor, b, 1, ceiling);
